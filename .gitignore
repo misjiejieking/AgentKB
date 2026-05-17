@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtualenv
+venv/
+.venv/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Data (runtime)
+data/uploads/
+data/vectors/
+data/logs/
+data/*.db
+
+# Environment
+.env
+.env.local
+
+# OS
+Thumbs.db
+.DS_Store

@@ -1,0 +1,67 @@
+# AgentKB Configuration
+# Environment variables override values: set AGENTKB_LLM_MODEL_NAME, etc.
+
+app:
+  name: "Knowledge Agent"
+  version: "0.1.0"
+  host: "127.0.0.1"
+  port: 7860
+  debug: false
+  auto_open_browser: true
+
+llm:
+  provider: "ollama"              # ollama | openai
+  model_name: "qwen2.5:7b"
+  base_url: "http://localhost:11434"
+  temperature: 0.1
+  max_tokens: 4096
+  request_timeout: 120
+  streaming: true
+  openai_api_key: ""              # env: OPENAI_API_KEY
+  openai_base_url: ""
+
+embedding:
+  model_name: "BAAI/bge-m3"
+  device: "cpu"                   # cpu | cuda
+  normalize: true
+  batch_size: 32
+  dimension: 1024
+
+knowledge:
+  chunk_size: 512
+  chunk_overlap: 100
+  retrieval_top_k: 5
+  score_threshold: 0.3
+  supported_extensions:
+    - ".md"
+    - ".txt"
+  max_file_size_mb: 10
+
+qdrant:
+  mode: "local"                   # local | server
+  path: "data/vectors"
+  collection_name: "knowledge"
+
+database:
+  type: "sqlite"
+  path: "data/agentkb.db"
+  wal_mode: true
+  session_retention_days: 30
+
+web_search:
+  enabled: true
+  engine: "duckduckgo"
+  max_results: 5
+  timeout: 10
+
+logging:
+  level: "INFO"
+  file: "data/logs/agentkb.log"
+  rotation: "10 MB"
+  retention: "7 days"
+  console: true
+  log_tool_calls: true
+
+langgraph:
+  checkpointer_db: "data/checkpoints.db"
+  max_recursion_limit: 10
