@@ -1,12 +1,9 @@
-"""AgentKB 应用入口——初始化所有服务并启动 Gradio。"""
+"""AgentKB 应用入口——初始化所有服务并启动 FastAPI 服务器。"""
 
 from __future__ import annotations
 
-import sys
 import webbrowser
 from pathlib import Path
-
-from loguru import logger
 
 from agentkb.config.settings import Settings
 from agentkb.utils.logger import setup_logger
@@ -30,7 +27,6 @@ def _register_tools(cfg: Settings) -> None:
         max_results=cfg.web_search_max_results,
         timeout=cfg.web_search_timeout,
     ))
-    logger.info(f"已注册 {len(registry.list_tools())} 个工具")
 
 
 def main() -> None:
@@ -39,6 +35,7 @@ def main() -> None:
     cfg = Settings.load()
 
     # 2. 初始化日志
+    from loguru import logger
     setup_logger(
         level=cfg.logging_level,
         log_file=cfg.logging_file,
@@ -52,8 +49,9 @@ def main() -> None:
 
     # 4. 注册工具
     _register_tools(cfg)
+    logger.info(f"已注册 {len(ToolRegistry().list_tools())} 个工具")
 
-    # 5. 验证 LLM 连接（可选，启动时警告但不阻断）
+    # 5. 验证 LLM 连接
     try:
         from agentkb.llm.factory import create_llm
         provider = create_llm(cfg)
@@ -62,7 +60,7 @@ def main() -> None:
         logger.warning(f"LLM 连接检查失败: {e}")
         logger.warning("请确保 Ollama 已启动且模型已下载")
 
-    # 6. 检查向量模型
+    # 6. 预热向量模型
     try:
         from agentkb.knowledge.embedder import get_embedder
         get_embedder(
@@ -75,23 +73,25 @@ def main() -> None:
         logger.warning(f"向量模型加载失败: {e}")
 
     # 7. 构建 LangGraph
+    import asyncio
     from agentkb.agent.graph import AgentGraph
-    agent_graph = AgentGraph()
+    agent_graph = asyncio.run(AgentGraph.create())
 
-    # 8. 构建 UI
-    from agentkb.ui.app import build_ui
-    ui = build_ui(graph=agent_graph)
+    # 8. 构建 FastAPI 应用
+    from agentkb.api.server import create_app
+    api_app = create_app(graph=agent_graph)
 
-    # 9. 启动
+    # 9. 启动 uvicorn
+    import uvicorn
     if cfg.app_auto_open_browser:
         webbrowser.open(f"http://{cfg.app_host}:{cfg.app_port}")
 
     logger.info(f"AgentKB 启动于 http://{cfg.app_host}:{cfg.app_port}")
-    ui.queue(default_concurrency_limit=5).launch(
-        server_name=cfg.app_host,
-        server_port=cfg.app_port,
-        share=False,
-        inbrowser=False,
+    uvicorn.run(
+        api_app,
+        host=cfg.app_host,
+        port=cfg.app_port,
+        log_level="info",
     )
 
 

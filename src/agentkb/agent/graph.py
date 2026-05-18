@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
+import aiosqlite
 from pathlib import Path
 from typing import AsyncGenerator, Any
 
 from langchain_core.messages import AIMessage, HumanMessage
-from langgraph.checkpoint.sqlite import SqliteSaver
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import StateGraph, END
 from loguru import logger
 
@@ -26,8 +28,8 @@ def _should_continue(state: AgentState) -> str:
     return END
 
 
-def build_graph(checkpointer_path: str = "data/checkpoints.db") -> StateGraph:
-    """构建并编译 LangGraph 状态图。"""
+async def build_graph(checkpointer_path: str = "data/checkpoints.db") -> StateGraph:
+    """构建并编译 LangGraph 状态图（异步检查点器）。"""
     workflow = StateGraph(dict)
 
     workflow.add_node("agent", agent_node)
@@ -43,7 +45,8 @@ def build_graph(checkpointer_path: str = "data/checkpoints.db") -> StateGraph:
     workflow.add_edge("tools", "agent")
 
     Path(checkpointer_path).parent.mkdir(parents=True, exist_ok=True)
-    checkpointer = SqliteSaver.from_conn_string(checkpointer_path)
+    conn = await aiosqlite.connect(checkpointer_path)
+    checkpointer = AsyncSqliteSaver(conn)
 
     max_recursion = Settings.load().langgraph_max_recursion_limit
     return workflow.compile(checkpointer=checkpointer)
@@ -53,7 +56,13 @@ class AgentGraph:
     """封装已编译的 LangGraph 图，暴露异步流式 API。"""
 
     def __init__(self, graph: StateGraph | None = None) -> None:
-        self._graph = graph or build_graph()
+        self._graph = graph
+
+    @classmethod
+    async def create(cls, checkpointer_path: str = "data/checkpoints.db") -> AgentGraph:
+        """异步工厂方法——构建图并返回 AgentGraph 实例。"""
+        graph = await build_graph(checkpointer_path)
+        return cls(graph)
 
     async def stream(
         self,
@@ -61,16 +70,10 @@ class AgentGraph:
         session_id: str = "default",
         thread_id: str = "default",
     ) -> AsyncGenerator[dict[str, Any], None]:
-        """
-        流式执行 Agent 并逐事件 yield。
+        """流式执行 Agent 并逐事件 yield。"""
+        if self._graph is None:
+            self._graph = await build_graph()
 
-        Yields:
-            {"type": "token", "content": str}     — LLM 流式 token
-            {"type": "tool_start", "name": str, "input": dict}
-            {"type": "tool_end", "name": str, "output": str}
-            {"type": "done", "session_id": str}
-            {"type": "error", "message": str}
-        """
         input_state = {
             "session_id": session_id,
             "messages": [HumanMessage(content=user_input)],

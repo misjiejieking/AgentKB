@@ -94,6 +94,14 @@ class Database:
                 (title, now_iso(), session_id),
             )
 
+    def list_sessions(self) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT s.*, (SELECT COUNT(*) FROM messages WHERE session_id = s.id) AS message_count "
+                "FROM sessions s ORDER BY updated_at DESC"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
     def delete_session(self, session_id: str) -> bool:
         with self._connect() as conn:
             conn.execute("DELETE FROM messages WHERE session_id = ?", (session_id,))
@@ -120,6 +128,21 @@ class Database:
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (msg_id, session_id, role, content, tool_calls, tool_results, now),
             )
+            conn.execute(
+                "UPDATE sessions SET updated_at = ? WHERE id = ?",
+                (now, session_id),
+            )
+            # 自动标题：如果是第一条 human 消息且标题为 New Chat
+            if role == "human":
+                row = conn.execute(
+                    "SELECT title FROM sessions WHERE id = ?", (session_id,)
+                ).fetchone()
+                if row and row["title"] == "New Chat":
+                    title = content[:40] + ("..." if len(content) > 40 else "")
+                    conn.execute(
+                        "UPDATE sessions SET title = ? WHERE id = ?",
+                        (title, session_id),
+                    )
         return {
             "id": msg_id,
             "session_id": session_id,

@@ -27,7 +27,7 @@ class EmbedderService:
             raise EmbeddingError(f"无法加载向量模型 '{model_name}': {e}") from e
         self._normalize = normalize
         self._batch_size = batch_size
-        self._dimension = self._model.get_sentence_embedding_dimension()
+        self._dimension = self._model.get_embedding_dimension()
         logger.info(f"向量模型就绪 — 维度={self._dimension}, 批次={batch_size}")
 
     @property

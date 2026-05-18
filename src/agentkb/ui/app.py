@@ -29,12 +29,7 @@ def build_ui(graph: AgentGraph | None = None) -> gr.Blocks:
         chunk_overlap=cfg.knowledge_chunk_overlap,
     )
 
-    css = """
-    .tool-status { font-size: 0.85em; color: #6b7280; margin: 4px 0; }
-    footer { visibility: hidden; }
-    """
-
-    with gr.Blocks(title="Knowledge Agent", css=css, theme=gr.themes.Soft()) as app:
+    with gr.Blocks(title="Knowledge Agent") as app:
         session_id = gr.State(value=new_id())
 
         gr.Markdown("# Knowledge Agent")
@@ -43,7 +38,6 @@ def build_ui(graph: AgentGraph | None = None) -> gr.Blocks:
             label="对话",
             height=550,
             render_markdown=True,
-            show_copy_button=True,
         )
 
         with gr.Row():
