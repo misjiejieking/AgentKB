@@ -1,12 +1,13 @@
-"""工具：search_knowledge_base — 本地知识库语义检索。"""
+"""工具：search_knowledge_base — 混合检索 + 重排序。"""
 
 from __future__ import annotations
 
 from pydantic import BaseModel, Field
 
+from agentkb.config.settings import Settings
 from agentkb.tools.base import BaseTool, ToolResult
-from agentkb.knowledge.embedder import get_embedder
-from agentkb.knowledge.vector_store import get_vector_store
+from agentkb.knowledge.retriever import get_retriever
+from agentkb.knowledge.reranker import get_reranker
 
 
 class KnowledgeSearchInput(BaseModel):
@@ -15,7 +16,7 @@ class KnowledgeSearchInput(BaseModel):
 
 
 class KnowledgeSearchTool(BaseTool):
-    """检索用户本地知识库中的文档内容。"""
+    """混合检索（dense + BM25 → RRF 融合 → Reranker 精排）本地知识库。"""
 
     @property
     def name(self) -> str:
@@ -35,29 +36,40 @@ class KnowledgeSearchTool(BaseTool):
         return KnowledgeSearchInput
 
     async def _execute(self, query: str) -> ToolResult:
-        embedder = get_embedder()
-        vector_store = get_vector_store()
+        cfg = Settings.load()
+        retriever = get_retriever()
+        reranker = get_reranker()
 
-        query_vector = embedder.embed_query(query)
-        hits = vector_store.search(query_vector, limit=5, score_threshold=0.3)
+        # 1. 混合检索 → 候选集
+        candidates = retriever.retrieve(query)
 
-        if not hits:
+        if not candidates:
             return ToolResult(
                 tool_name=self.name,
                 success=True,
-                data={
-                    "query": query,
-                    "results": [],
-                    "hint": "知识库中没有找到相关内容",
-                },
+                data={"query": query, "results": [], "hint": "知识库中没有找到相关内容"},
             )
 
+        # 2. 重排序 → 精排
+        ranked = reranker.rerank(query, candidates, top_k=cfg.retrieval_final_k)
+
+        # 3. 格式化输出：优先使用 parent_content 保证完整上下文
         results = []
-        for hit in hits:
+        for r in ranked:
+            content = r.get("parent_content") or r.get("content", "")
+            chunk_meta = r.get("chunk_metadata")
+            if isinstance(chunk_meta, str):
+                import json
+                try:
+                    chunk_meta = json.loads(chunk_meta)
+                except json.JSONDecodeError:
+                    chunk_meta = {}
+
+            filename = (chunk_meta or {}).get("filename", "") or r.get("file_id", "unknown")
             results.append({
-                "content": hit.payload.get("content", "")[:1024],
-                "filename": hit.payload.get("filename", "unknown"),
-                "score": round(hit.score, 4),
+                "content": content,
+                "filename": filename,
+                "score": r.get("rerank_score", 0),
             })
 
         return ToolResult(

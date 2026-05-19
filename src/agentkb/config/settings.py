@@ -154,22 +154,6 @@ class Settings:
     # ── knowledge ───────────────────────────────────────────────
 
     @property
-    def knowledge_chunk_size(self) -> int:
-        return self._val("knowledge", "chunk_size")
-
-    @property
-    def knowledge_chunk_overlap(self) -> int:
-        return self._val("knowledge", "chunk_overlap")
-
-    @property
-    def knowledge_retrieval_top_k(self) -> int:
-        return self._val("knowledge", "retrieval_top_k")
-
-    @property
-    def knowledge_score_threshold(self) -> float:
-        return self._val("knowledge", "score_threshold")
-
-    @property
     def knowledge_supported_extensions(self) -> list[str]:
         return self._val("knowledge", "supported_extensions")
 
@@ -177,37 +161,85 @@ class Settings:
     def knowledge_max_file_size_mb(self) -> int:
         return self._val("knowledge", "max_file_size_mb")
 
-    # ── qdrant ──────────────────────────────────────────────────
+    # ── postgresql ──────────────────────────────────────────────
 
     @property
-    def qdrant_mode(self) -> str:
-        return self._val("qdrant", "mode")
+    def pg_host(self) -> str:
+        return self._val("postgresql", "host")
 
     @property
-    def qdrant_path(self) -> str:
-        return self._val("qdrant", "path")
+    def pg_port(self) -> int:
+        return self._val("postgresql", "port")
 
     @property
-    def qdrant_collection_name(self) -> str:
-        return self._val("qdrant", "collection_name")
+    def pg_dbname(self) -> str:
+        return self._val("postgresql", "dbname")
 
-    # ── database ─────────────────────────────────────────────────
+    @property
+    def pg_user(self) -> str:
+        return self._val("postgresql", "user")
+
+    @property
+    def pg_password(self) -> str:
+        return self._val("postgresql", "password")
+
+    @property
+    def pg_pool_min(self) -> int:
+        return self._val("postgresql", "pool_min")
+
+    @property
+    def pg_pool_max(self) -> int:
+        return self._val("postgresql", "pool_max")
+
+    # ── retrieval ───────────────────────────────────────────────
+
+    @property
+    def retrieval_dense_weight(self) -> float:
+        return self._val("retrieval", "dense_weight")
+
+    @property
+    def retrieval_bm25_weight(self) -> float:
+        return self._val("retrieval", "bm25_weight")
+
+    @property
+    def retrieval_candidate_k(self) -> int:
+        return self._val("retrieval", "candidate_k")
+
+    @property
+    def retrieval_final_k(self) -> int:
+        return self._val("retrieval", "final_k")
+
+    @property
+    def retrieval_rrf_k(self) -> int:
+        return self._val("retrieval", "rrf_k")
+
+    # ── chunking ────────────────────────────────────────────────
+
+    @property
+    def chunking_semantic_threshold(self) -> float:
+        return self._val("chunking", "semantic_threshold")
+
+    @property
+    def chunking_parent_size(self) -> int:
+        return self._val("chunking", "parent_size")
+
+    @property
+    def chunking_child_size(self) -> int:
+        return self._val("chunking", "child_size")
+
+    @property
+    def chunking_sliding_size(self) -> int:
+        return self._val("chunking", "sliding_size")
+
+    @property
+    def chunking_sliding_overlap(self) -> int:
+        return self._val("chunking", "sliding_overlap")
+
+    # ── database (postgresql) ───────────────────────────────────
 
     @property
     def database_type(self) -> str:
-        return self._val("database", "type")
-
-    @property
-    def database_path(self) -> str:
-        return self._val("database", "path")
-
-    @property
-    def database_wal_mode(self) -> bool:
-        return self._val("database", "wal_mode")
-
-    @property
-    def database_session_retention_days(self) -> int:
-        return self._val("database", "session_retention_days")
+        return self._val("database", "type", default=self.pg_dbname and "postgresql" or "sqlite")
 
     # ── web search ──────────────────────────────────────────────
 

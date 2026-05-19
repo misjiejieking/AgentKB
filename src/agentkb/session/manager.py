@@ -13,7 +13,7 @@ from langchain_core.messages import (
 )
 from loguru import logger
 
-from agentkb.storage.database import get_db
+from agentkb.storage.pg_database import get_db
 from agentkb.storage.models import MessageRole, new_id, now_iso
 
 

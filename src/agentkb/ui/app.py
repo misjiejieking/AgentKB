@@ -11,9 +11,8 @@ from agentkb.agent.graph import AgentGraph
 from agentkb.knowledge.loader import FileLoader
 from agentkb.knowledge.splitter import TextSplitter
 from agentkb.knowledge.embedder import get_embedder
-from agentkb.knowledge.vector_store import get_vector_store
 from agentkb.session.manager import SessionManager
-from agentkb.storage.database import get_db
+from agentkb.storage.pg_database import get_db
 from agentkb.storage.models import new_id
 from agentkb.config.settings import Settings
 

@@ -1,4 +1,4 @@
-from .database import Database, get_db
+from .pg_database import Database, get_db
 from .models import Session, Message, MessageRole, KnowledgeFile, new_id
 
 __all__ = [

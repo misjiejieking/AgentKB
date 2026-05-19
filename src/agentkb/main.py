@@ -14,7 +14,7 @@ from agentkb.tools.web_search import WebSearchTool
 
 def _ensure_data_dirs() -> None:
     """创建运行时所需的全部数据目录。"""
-    dirs = ["data/uploads", "data/vectors", "data/logs"]
+    dirs = ["data/uploads", "data/logs"]
     for d in dirs:
         Path(d).mkdir(parents=True, exist_ok=True)
 
@@ -47,11 +47,20 @@ def main() -> None:
     # 3. 创建数据目录
     _ensure_data_dirs()
 
-    # 4. 注册工具
+    # 4. 初始化 PG 数据库（建表 + pgvector 扩展）
+    try:
+        from agentkb.storage.pg_database import get_db
+        get_db()
+    except Exception as e:
+        logger.error(f"PostgreSQL 连接失败: {e}")
+        logger.error("请确保 PostgreSQL 已启动，且 pgvector 扩展可用")
+        raise
+
+    # 5. 注册工具
     _register_tools(cfg)
     logger.info(f"已注册 {len(ToolRegistry().list_tools())} 个工具")
 
-    # 5. 验证 LLM 连接
+    # 6. 验证 LLM 连接
     try:
         from agentkb.llm.factory import create_llm
         provider = create_llm(cfg)
@@ -60,7 +69,7 @@ def main() -> None:
         logger.warning(f"LLM 连接检查失败: {e}")
         logger.warning("请确保 Ollama 已启动且模型已下载")
 
-    # 6. 预热向量模型
+    # 7. 预热向量模型
     try:
         from agentkb.knowledge.embedder import get_embedder
         get_embedder(
@@ -72,16 +81,23 @@ def main() -> None:
     except Exception as e:
         logger.warning(f"向量模型加载失败: {e}")
 
-    # 7. 构建 LangGraph
+    # 8. 预热 Reranker 模型
+    try:
+        from agentkb.knowledge.reranker import get_reranker
+        get_reranker(device=cfg.embedding_device)
+    except Exception as e:
+        logger.warning(f"Reranker 模型加载失败: {e}")
+
+    # 9. 构建 LangGraph
     import asyncio
     from agentkb.agent.graph import AgentGraph
     agent_graph = asyncio.run(AgentGraph.create())
 
-    # 8. 构建 FastAPI 应用
+    # 10. 构建 FastAPI 应用
     from agentkb.api.server import create_app
     api_app = create_app(graph=agent_graph)
 
-    # 9. 启动 uvicorn
+    # 11. 启动 uvicorn
     import uvicorn
     if cfg.app_auto_open_browser:
         webbrowser.open(f"http://{cfg.app_host}:{cfg.app_port}")

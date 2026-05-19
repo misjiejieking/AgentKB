@@ -13,10 +13,9 @@ from loguru import logger
 
 from agentkb.api.deps import get_graph, get_settings, get_session_mgr
 from agentkb.knowledge.embedder import get_embedder
-from agentkb.knowledge.vector_store import get_vector_store
 from agentkb.knowledge.loader import FileLoader
 from agentkb.knowledge.splitter import TextSplitter
-from agentkb.storage.database import get_db
+from agentkb.storage.pg_database import get_db
 from agentkb.storage.models import new_id
 
 router = APIRouter()
@@ -86,27 +85,20 @@ async def upload_files(files: list[UploadFile] = File(...)):
     """上传知识文件并完成切块→向量化→入库全流程。"""
     cfg = get_settings()
     loader = FileLoader()
-    splitter = TextSplitter(
-        chunk_size=cfg.knowledge_chunk_size,
-        chunk_overlap=cfg.knowledge_chunk_overlap,
-    )
     embedder = get_embedder(
         model_name=cfg.embedding_model_name,
         device=cfg.embedding_device,
         normalize=cfg.embedding_normalize,
         batch_size=cfg.embedding_batch_size,
     )
-    vector_store = get_vector_store(
-        path=cfg.qdrant_path,
-        collection_name=cfg.qdrant_collection_name,
-        vector_size=cfg.embedding_dimension,
-    )
+    splitter = TextSplitter(embedder=embedder)
     db = get_db()
 
     results = []
     for file in files:
         try:
             content = await file.read()
+            ext = Path(file.filename or "").suffix.lower()
             saved_path = Path("data/uploads") / (file.filename or "uploaded_file")
             saved_path.parent.mkdir(parents=True, exist_ok=True)
             saved_path.write_bytes(content)
@@ -117,26 +109,27 @@ async def upload_files(files: list[UploadFile] = File(...)):
             embeddings = embedder.embed_documents(texts)
 
             file_id = new_id()
-            points = []
+            chunk_records = []
             for i, (chunk, emb) in enumerate(zip(chunks, embeddings)):
-                points.append({
-                    "id": uuid.uuid4().hex,
-                    "vector": emb,
-                    "payload": {
-                        "file_id": file_id,
+                chunk_records.append({
+                    "file_id": file_id,
+                    "chunk_index": i,
+                    "content": chunk.page_content,
+                    "embedding": emb,
+                    "chunk_metadata": {
                         "filename": chunk.metadata.get("source", file.filename),
-                        "chunk_index": i,
-                        "content": chunk.page_content,
+                        "source": chunk.metadata.get("source", ""),
                     },
                 })
 
-            vector_store.upsert(points)
+            db.upsert_chunks(chunk_records)
             db.add_knowledge_file(
                 file_id=file_id,
                 filename=file.filename or "unknown",
                 filepath=str(saved_path),
                 file_size=len(content),
                 chunk_count=len(chunks),
+                file_type=ext.lstrip(".") or "unknown",
             )
             results.append({"status": "ok", "filename": file.filename, "chunks": len(chunks)})
         except Exception as exc:
@@ -160,15 +153,9 @@ def list_files():
 @router.delete("/knowledge/files/{file_id}")
 def delete_file(file_id: str):
     """软删除知识文件并从向量库移除。"""
-    cfg = get_settings()
     db = get_db()
     db.delete_knowledge_file(file_id)
-    vector_store = get_vector_store(
-        path=cfg.qdrant_path,
-        collection_name=cfg.qdrant_collection_name,
-        vector_size=cfg.embedding_dimension,
-    )
-    deleted_count = vector_store.delete_by_file_id(file_id)
+    deleted_count = db.delete_chunks_by_file_id(file_id)
     return {"deleted": True, "file_id": file_id, "vectors_removed": deleted_count}
 
 
