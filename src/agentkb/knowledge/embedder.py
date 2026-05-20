@@ -22,6 +22,7 @@ class EmbedderService:
         try:
             self._model = SentenceTransformer(
                 model_name, device=device, trust_remote_code=True,
+                local_files_only=True,
             )
         except Exception as e:
             raise EmbeddingError(f"无法加载向量模型 '{model_name}': {e}") from e

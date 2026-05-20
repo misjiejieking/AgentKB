@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS sessions (
 
 CREATE TABLE IF NOT EXISTS messages (
     id TEXT PRIMARY KEY,
-    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    session_id TEXT NOT NULL,
     role TEXT NOT NULL CHECK(role IN ('human','ai','tool')),
     content TEXT NOT NULL,
     tool_calls JSONB,
@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS knowledge_files (
 
 CREATE TABLE IF NOT EXISTS knowledge_chunks (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    file_id TEXT NOT NULL REFERENCES knowledge_files(id) ON DELETE CASCADE,
+    file_id TEXT NOT NULL,
     chunk_index INT NOT NULL,
     content TEXT NOT NULL,
     parent_content TEXT,
@@ -165,6 +165,7 @@ class Database:
     def delete_session(self, session_id: str) -> bool:
         with self._connect() as conn:
             with conn.cursor() as cur:
+                cur.execute("DELETE FROM messages WHERE session_id = %s", (session_id,))
                 cur.execute("DELETE FROM sessions WHERE id = %s", (session_id,))
                 return cur.rowcount > 0
 
@@ -192,6 +193,7 @@ class Database:
                      json.dumps(tc, ensure_ascii=False) if tc else None,
                      json.dumps(tr, ensure_ascii=False) if tr else None),
                 )
+                result = dict(cur.fetchone())
                 # 更新会话 updated_at
                 cur.execute(
                     "UPDATE sessions SET updated_at = NOW() WHERE id = %s",
@@ -207,7 +209,7 @@ class Database:
                             "UPDATE sessions SET title = %s WHERE id = %s",
                             (title, session_id),
                         )
-                return dict(cur.fetchone())
+                return result
 
     def get_messages(self, session_id: str) -> list[dict[str, Any]]:
         with self._connect() as conn:

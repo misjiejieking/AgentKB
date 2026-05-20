@@ -53,12 +53,27 @@ retrieval:
   final_k: 5
   rrf_k: 60
 
+reranker:
+  provider: "bailian"              # bailian | local
+  model_name: "qwen3-vl-rerank"
+  base_url: "https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank"
+  api_key: ""                                 # env: DASHSCOPE_API_KEY
+  timeout: 30
+
 chunking:
   semantic_threshold: 0.5
   parent_size: 1024
   child_size: 256
   sliding_size: 512
   sliding_overlap: 100
+
+eval:
+  testset_path: "data/eval/testset.json"
+  report_dir: "data/eval/reports"
+  questions_per_chunk: 2
+  generation_sample_size: 50
+  retrieval_k_values: [5, 10, 20]
+  judge_model: "qwen2.5:7b"
 
 web_search:
   enabled: true

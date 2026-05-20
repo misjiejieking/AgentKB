@@ -81,12 +81,12 @@ def main() -> None:
     except Exception as e:
         logger.warning(f"向量模型加载失败: {e}")
 
-    # 8. 预热 Reranker 模型
+    # 8. 预热 Reranker（根据配置选择本地模型或 API）
     try:
         from agentkb.knowledge.reranker import get_reranker
-        get_reranker(device=cfg.embedding_device)
+        get_reranker()
     except Exception as e:
-        logger.warning(f"Reranker 模型加载失败: {e}")
+        logger.warning(f"Reranker 初始化失败: {e}")
 
     # 9. 构建 LangGraph
     import asyncio

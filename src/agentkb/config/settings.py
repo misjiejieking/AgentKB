@@ -213,6 +213,28 @@ class Settings:
     def retrieval_rrf_k(self) -> int:
         return self._val("retrieval", "rrf_k")
 
+    # ── reranker ──────────────────────────────────────────────────
+
+    @property
+    def reranker_provider(self) -> str:
+        return self._val("reranker", "provider")
+
+    @property
+    def reranker_model_name(self) -> str:
+        return self._val("reranker", "model_name")
+
+    @property
+    def reranker_base_url(self) -> str:
+        return self._val("reranker", "base_url")
+
+    @property
+    def reranker_api_key(self) -> str:
+        return os.getenv("DASHSCOPE_API_KEY", self._val("reranker", "api_key"))
+
+    @property
+    def reranker_timeout(self) -> int:
+        return self._val("reranker", "timeout")
+
     # ── chunking ────────────────────────────────────────────────
 
     @property
@@ -240,6 +262,32 @@ class Settings:
     @property
     def database_type(self) -> str:
         return self._val("database", "type", default=self.pg_dbname and "postgresql" or "sqlite")
+
+    # ── eval ────────────────────────────────────────────────────
+
+    @property
+    def eval_testset_path(self) -> str:
+        return self._val("eval", "testset_path")
+
+    @property
+    def eval_report_dir(self) -> str:
+        return self._val("eval", "report_dir")
+
+    @property
+    def eval_questions_per_chunk(self) -> int:
+        return self._val("eval", "questions_per_chunk")
+
+    @property
+    def eval_generation_sample_size(self) -> int:
+        return self._val("eval", "generation_sample_size")
+
+    @property
+    def eval_retrieval_k_values(self) -> list[int]:
+        return self._val("eval", "retrieval_k_values")
+
+    @property
+    def eval_judge_model(self) -> str:
+        return self._val("eval", "judge_model")
 
     # ── web search ──────────────────────────────────────────────
 

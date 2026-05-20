@@ -122,7 +122,6 @@ async def upload_files(files: list[UploadFile] = File(...)):
                     },
                 })
 
-            db.upsert_chunks(chunk_records)
             db.add_knowledge_file(
                 file_id=file_id,
                 filename=file.filename or "unknown",
@@ -131,6 +130,7 @@ async def upload_files(files: list[UploadFile] = File(...)):
                 chunk_count=len(chunks),
                 file_type=ext.lstrip(".") or "unknown",
             )
+            db.upsert_chunks(chunk_records)
             results.append({"status": "ok", "filename": file.filename, "chunks": len(chunks)})
         except Exception as exc:
             logger.error(f"File upload error: {exc}", exc_info=True)
