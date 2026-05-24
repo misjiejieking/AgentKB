@@ -85,7 +85,7 @@ class AgentGraph:
                 input_state, config, version="v2"
             ):
                 kind = event.get("event", "")
-
+                print(kind)
                 if kind == "on_chat_model_stream":
                     chunk = event["data"]["chunk"]
                     if hasattr(chunk, "content") and chunk.content:

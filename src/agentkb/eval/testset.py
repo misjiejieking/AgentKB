@@ -129,7 +129,6 @@ class TestSet:
     def generate(
         cls,
         db,
-        embedder,
         sample_size: int = 50,
         questions_per_chunk: int = 2,
         seed: int = 42,
@@ -211,7 +210,7 @@ class TestSet:
     def _sample_chunk_groups(
         db,
         sample_size: int,
-        window_size: int = 3,
+        window_size: int = 2,
         min_windows_per_file: int = 2,
     ) -> list[dict]:
         """按文件分层滑动窗口采样。

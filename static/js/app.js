@@ -8,6 +8,7 @@
 let sessionId = localStorage.getItem("agentkb_session_id") || "";
 let isStreaming = false;
 let sidebarVisible = true;
+let lastEventId = 0;  // SSE 断点续传：当前会话最后收到的 event id
 
 // ══════════════════════════════════════════════════════════════
 //  DOM 引用
@@ -188,21 +189,134 @@ async function loadMessageHistory(sid) {
 }
 
 function renderHistoryMessages(messages) {
-  // 保留 welcome screen DOM 元素，但隐藏它
   hideWelcome();
 
-  // 移除之前的消息（保留 welcomeScreen）
+  // 移除之前的消息
   chatContainer.querySelectorAll(".message").forEach((el) => el.remove());
 
-  messages.forEach((m) => {
+  let lastAiMsg = null;
+  messages.forEach((m, idx) => {
     if (m.role === "human") {
       addUserMessage(m.content);
     } else if (m.role === "ai") {
-      addAssistantMessage(m.content);
+      const isLast = idx === messages.length - 1;
+      if (isLast) {
+        lastAiMsg = m;
+        // 最后一条 AI 消息用 placeholder 渲染，方便重连时填入内容
+        const el = addAssistantPlaceholder();
+        if (m.content) {
+          el.innerHTML = renderMarkdown(m.content);
+        }
+      } else {
+        addAssistantMessage(m.content);
+      }
     }
   });
 
   scrollToBottom();
+
+  // 最后一条是 AI 消息 → 尝试重连（任务在跑则续流，已跑完则秒回 done）
+  if (lastAiMsg) {
+    setTimeout(() => reconnectStream(sessionId), 300);
+  }
+}
+
+async function reconnectStream(sid) {
+  // SSE Last-Event-ID 断点续传
+  const assistantEl = document.getElementById("current-assistant");
+  if (!assistantEl) return;
+  if (isStreaming) return;
+
+  isStreaming = true;
+  sendBtn.disabled = true;
+
+  // 保留已有内容，后续 token 往后追加
+  let accumulated = assistantEl.textContent.trim() || "";
+  let toolLines = [];
+  let throttleTimer = null;
+
+  function flushContent() {
+    let display = accumulated;
+    if (toolLines.length > 0) {
+      display += '\n\n<div class="tool-status">' + toolLines.join("<br>") + "</div>";
+    }
+    assistantEl.innerHTML = renderMarkdown(display);
+    scrollToBottom();
+  }
+
+  try {
+    const response = await fetch(`/api/chat/stream/${sid}`, {
+      headers: { "Last-Event-ID": String(lastEventId) },
+    });
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split("\n");
+      buf = lines.pop() || "";
+
+      for (const line of lines) {
+        if (line.startsWith("id: ")) {
+          lastEventId = parseInt(line.slice(4)) || lastEventId;
+          continue;
+        }
+        if (!line.startsWith("data: ")) continue;
+        try {
+          const event = JSON.parse(line.slice(6));
+          switch (event.type) {
+            case "token":
+              accumulated += event.content;
+              if (!throttleTimer) {
+                throttleTimer = setTimeout(() => { flushContent(); throttleTimer = null; }, 50);
+              }
+              break;
+            case "tool_start":
+              toolLines.push('<span class="spinner"></span> 正在调用 <b>' + escapeHtml(event.name) + "</b>……");
+              flushContent();
+              break;
+            case "tool_end":
+              toolLines = toolLines.map((l) =>
+                l.replace('class="spinner"', 'class="done-icon"').replace("正在调用", "已完成")
+              );
+              flushContent();
+              break;
+            case "done":
+              break;
+            case "error":
+              accumulated += '\n\n<span style="color:var(--danger)">' + escapeHtml(event.message || "未知错误") + "</span>";
+              flushContent();
+              break;
+          }
+        } catch (e) {}
+      }
+    }
+
+    if (throttleTimer) { clearTimeout(throttleTimer); throttleTimer = null; }
+    assistantEl.innerHTML = renderMarkdown(accumulated);
+    finalizeAssistant(assistantEl);
+    scrollToBottom();
+  } catch (err) {
+    // 重连失败（生成已结束），从 DB 加载完整内容兜底
+    try {
+      const resp = await fetch(`/api/session/${sid}/messages`);
+      const data = await resp.json();
+      const last = (data.messages || []).slice(-1)[0];
+      if (last && last.role === "ai" && last.content) {
+        assistantEl.innerHTML = renderMarkdown(last.content);
+        finalizeAssistant(assistantEl);
+        scrollToBottom();
+      }
+    } catch (e) {}
+  } finally {
+    isStreaming = false;
+    sendBtn.disabled = false;
+  }
 }
 
 function createNewSession() {
@@ -355,6 +469,10 @@ async function sendMessage(text) {
       buffer = lines.pop() || "";
 
       for (const line of lines) {
+        if (line.startsWith("id: ")) {
+          lastEventId = parseInt(line.slice(4)) || lastEventId;
+          continue;
+        }
         if (!line.startsWith("data: ")) continue;
         try {
           const event = JSON.parse(line.slice(6));

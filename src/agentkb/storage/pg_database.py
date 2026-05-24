@@ -225,6 +225,15 @@ class Database:
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM messages WHERE session_id = %s", (session_id,))
 
+    def update_message_content(self, msg_id: str, content: str) -> None:
+        """更新消息内容（流式过程中持续回写）。"""
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE messages SET content = %s WHERE id = %s",
+                    (content, msg_id),
+                )
+
     # ══════════════════════════════════════════════════════════════
     #  knowledge_files
     # ══════════════════════════════════════════════════════════════

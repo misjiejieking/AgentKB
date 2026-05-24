@@ -42,16 +42,13 @@ def cmd_generate(args) -> None:
     logger.info("正在生成银标测试集……")
 
     from agentkb.storage.pg_database import get_db
-    from agentkb.knowledge.embedder import get_embedder
     from agentkb.eval.testset import TestSet
 
     cfg = Settings.load()
     db = get_db()
-    embedder = get_embedder()
 
     testset = TestSet.generate(
         db=db,
-        embedder=embedder,
         sample_size=args.sample_size or cfg.eval_generation_sample_size,
         questions_per_chunk=cfg.eval_questions_per_chunk,
         seed=args.seed,
@@ -132,14 +129,14 @@ def cmd_compare(args) -> None:
     current_metrics = current_data.get("metrics", {})
 
     baseline = EvalResult(
-        k_values=list(baseline_metrics["recall_at_k"].keys()),
+        k_values=[int(k) for k in baseline_metrics["recall_at_k"].keys()],
         recall_at_k={int(k): v for k, v in baseline_metrics["recall_at_k"].items()},
         precision_at_k={int(k): v for k, v in baseline_metrics.get("precision_at_k", {}).items()},
         mrr=baseline_metrics.get("mrr", 0),
         ndcg_at_k={int(k): v for k, v in baseline_metrics.get("ndcg_at_k", {}).items()},
     )
     current = EvalResult(
-        k_values=list(current_metrics["recall_at_k"].keys()),
+        k_values=[int(k) for k in current_metrics["recall_at_k"].keys()],
         recall_at_k={int(k): v for k, v in current_metrics["recall_at_k"].items()},
         precision_at_k={int(k): v for k, v in current_metrics.get("precision_at_k", {}).items()},
         mrr=current_metrics.get("mrr", 0),

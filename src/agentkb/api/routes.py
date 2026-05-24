@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, UploadFile, File
+from fastapi import APIRouter, Request, UploadFile, File
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from loguru import logger
@@ -21,8 +23,74 @@ from agentkb.storage.models import new_id
 router = APIRouter()
 
 
-# ── 请求模型 ──────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════
+#  SessionStream — 解耦「LLM 执行」与「前端连接」
+# ══════════════════════════════════════════════════════════════
 
+class SessionStream:
+    """单会话的事件流——缓存事件（带 id），支持断点续传。
+
+    - _events: 索引 list，_events[0] 为事件 1
+    - _done: 生成是否完成
+    - _ai_msg_id: DB 中 AI 消息的 ID
+    - _subscribers: 当前连接的 SSE 队列（广播用）
+    """
+
+    MAX_EVENTS = 2000
+
+    def __init__(self, session_id: str, ai_msg_id: str):
+        self.session_id = session_id
+        self.ai_msg_id = ai_msg_id
+        self._events: list[dict] = []
+        self._done = False
+        self._subscribers: list[asyncio.Queue] = []
+
+    def push(self, event: dict) -> None:
+        if len(self._events) >= self.MAX_EVENTS:
+            self._events.pop(0)
+        self._events.append(event)
+        # 广播给所有订阅者
+        for q in self._subscribers:
+            if not q.full():
+                q.put_nowait(event)
+
+    def finish(self) -> None:
+        self._done = True
+        for q in self._subscribers:
+            if not q.full():
+                q.put_nowait(None)  # 结束信号
+
+    def subscribe(self) -> asyncio.Queue:
+        q: asyncio.Queue = asyncio.Queue(maxsize=256)
+        self._subscribers.append(q)
+        return q
+
+    def unsubscribe(self, q: asyncio.Queue) -> None:
+        try:
+            self._subscribers.remove(q)
+        except ValueError:
+            pass
+
+    def events_since(self, last_id: int) -> list[dict]:
+        """返回 last_id 之后的所有事件（last_id=0 表示从头）。"""
+        if last_id <= 0:
+            return list(self._events)
+        return self._events[last_id:]  # last_id 是 1-based 索引
+
+
+# 全局流注册表
+_streams: dict[str, SessionStream] = {}
+
+
+def _get_or_create_stream(session_id: str, ai_msg_id: str = "") -> SessionStream:
+    if session_id not in _streams or _streams[session_id]._done:
+        _streams[session_id] = SessionStream(session_id, ai_msg_id)
+    return _streams[session_id]
+
+
+# ══════════════════════════════════════════════════════════════
+#  请求模型
+# ══════════════════════════════════════════════════════════════
 
 class ChatRequest(BaseModel):
     message: str
@@ -33,48 +101,136 @@ class ClearSessionRequest(BaseModel):
     session_id: str
 
 
-# ── 聊天 SSE 流式传输 ──────────────────────────────────────────
-
+# ══════════════════════════════════════════════════════════════
+#  聊天 SSE（POST 新消息 / GET 断点续传）
+# ══════════════════════════════════════════════════════════════
 
 @router.post("/chat/stream")
 async def chat_stream(req: ChatRequest):
-    """SSE 流式对话端点，逐 token 推送回答。"""
+    """发起新对话，启动 LLM 后台任务。"""
     session_mgr = get_session_mgr()
     graph = get_graph()
 
     session_mgr.ensure_session(req.session_id)
     session_mgr.save_message(req.session_id, "human", req.message)
 
-    async def event_generator():
+    db = get_db()
+    ai_msg_id = new_id()
+    db.add_message(msg_id=ai_msg_id, session_id=req.session_id, role="ai", content="")
+
+    stream = _get_or_create_stream(req.session_id, ai_msg_id)
+
+    async def run_llm():
         accumulated = ""
+        token_count = 0
         try:
             async for event in graph.stream(
                 user_input=req.message,
                 session_id=req.session_id,
                 thread_id=req.session_id,
             ):
-                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-
+                stream.push(event)
                 if event["type"] == "token":
                     accumulated += event["content"]
+                    token_count += 1
+                    if token_count % 5 == 0:
+                        db.update_message_content(ai_msg_id, accumulated)
                 elif event["type"] == "done":
-                    session_mgr.save_message(req.session_id, "ai", accumulated)
+                    db.update_message_content(ai_msg_id, accumulated)
                 elif event["type"] == "error":
                     if accumulated:
-                        session_mgr.save_message(req.session_id, "ai", accumulated)
+                        db.update_message_content(ai_msg_id, accumulated)
+            stream.finish()
         except Exception as exc:
-            logger.error(f"SSE stream error: {exc}", exc_info=True)
-            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
+            logger.error(f"LLM 后台任务出错: {exc}", exc_info=True)
+            if accumulated:
+                db.update_message_content(ai_msg_id, accumulated)
+            stream.push({"type": "error", "message": str(exc)})
+            stream.finish()
 
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
+    asyncio.ensure_future(run_llm())
+
+    q = stream.subscribe()
+    try:
+        async def new_stream():
+            event_id = 0
+            try:
+                while True:
+                    event = await q.get()
+                    if event is None:
+                        break
+                    event_id += 1
+                    yield f"id: {event_id}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+            except asyncio.CancelledError:
+                pass
+            finally:
+                stream.unsubscribe(q)
+
+        return StreamingResponse(
+            new_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+    except Exception:
+        stream.unsubscribe(q)
+        raise
+
+
+@router.get("/chat/stream/{session_id}")
+async def chat_resume(session_id: str, request: Request):
+    """断点续传：根据 Last-Event-ID 补发漏掉的事件，继续接收新事件。"""
+    stream = _streams.get(session_id)
+    if not stream or stream._done:
+        async def done():
+            yield f"id: 0\ndata: {json.dumps({'type': 'done', 'session_id': session_id}, ensure_ascii=False)}\n\n"
+            if False: yield ""
+        return StreamingResponse(
+            done(), media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache"},
+        )
+
+    # 解析 Last-Event-ID
+    last_id_str = request.headers.get("Last-Event-ID", "0")
+    try:
+        last_id = int(last_id_str)
+    except ValueError:
+        last_id = 0
+
+    # last_id=0 表示首次连接，跳到最新位置，不回放历史
+    if last_id == 0:
+        last_id = len(stream._events)
+    missed = stream.events_since(last_id)
+    event_id = last_id
+
+    q = stream.subscribe()
+    try:
+        async def resume_stream():
+            nonlocal event_id
+            # 补发漏掉的事件
+            for ev in missed:
+                event_id += 1
+                yield f"id: {event_id}\ndata: {json.dumps(ev, ensure_ascii=False)}\n\n"
+            # 继续接收新事件
+            try:
+                while True:
+                    ev = await q.get()
+                    if ev is None:
+                        break
+                    event_id += 1
+                    yield f"id: {event_id}\ndata: {json.dumps(ev, ensure_ascii=False)}\n\n"
+            except asyncio.CancelledError:
+                pass
+            finally:
+                stream.unsubscribe(q)
+
+        return StreamingResponse(
+            resume_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+    except Exception:
+        stream.unsubscribe(q)
+        raise
 
 
 # ── 文件上传与向量化 ────────────────────────────────────────────

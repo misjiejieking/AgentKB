@@ -7,7 +7,6 @@ from pydantic import BaseModel, Field
 from agentkb.config.settings import Settings
 from agentkb.tools.base import BaseTool, ToolResult
 from agentkb.knowledge.retriever import get_retriever
-from agentkb.knowledge.reranker import get_reranker
 
 
 class KnowledgeSearchInput(BaseModel):
@@ -38,7 +37,6 @@ class KnowledgeSearchTool(BaseTool):
     async def _execute(self, query: str) -> ToolResult:
         cfg = Settings.load()
         retriever = get_retriever()
-        reranker = get_reranker()
 
         # 1. 混合检索 → 候选集
         candidates = retriever.retrieve(query)
@@ -50,8 +48,9 @@ class KnowledgeSearchTool(BaseTool):
                 data={"query": query, "results": [], "hint": "知识库中没有找到相关内容"},
             )
 
-        # 2. 重排序 → 精排
-        ranked = reranker.rerank(query, candidates, top_k=cfg.retrieval_final_k)
+        # 2. 按 RRF 分数排序（reranker 暂不使用：百炼免费额度已用完，本地 CPU 推理太慢）
+        candidates.sort(key=lambda x: x.get("rrf_score", 0), reverse=True)
+        ranked = candidates[:cfg.retrieval_final_k]
 
         # 3. 格式化输出：优先使用 parent_content 保证完整上下文
         results = []

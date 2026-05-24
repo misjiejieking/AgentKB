@@ -1,94 +1,80 @@
-# AgentKB Configuration
-# Environment variables override values: set AGENTKB_LLM_MODEL_NAME, etc.
-
 app:
-  name: "Knowledge Agent"
-  version: "0.2.0"
-  host: "127.0.0.1"
-  port: 8000
-  debug: false
   auto_open_browser: true
-
+  debug: false
+  host: 127.0.0.1
+  name: Knowledge Agent
+  port: 8000
+  version: 0.2.0
+chunking:
+  child_size: 256
+  parent_size: 1024
+  semantic_threshold: 0.5
+  sliding_overlap: 100
+  sliding_size: 512
+embedding:
+  batch_size: 32
+  device: cpu
+  dimension: 1024
+  model_name: BAAI/bge-m3
+  normalize: true
+eval:
+  generation_sample_size: 50
+  judge_model: qwen2.5:7b
+  questions_per_chunk: 2
+  report_dir: data/eval/reports
+  retrieval_k_values:
+  - 5
+  - 10
+  - 20
+  testset_path: data/eval/testset.json
+knowledge:
+  max_file_size_mb: 10
+  supported_extensions:
+  - .md
+  - .txt
+  - .pdf
+  - .docx
+  - .csv
+  - .json
+langgraph:
+  checkpointer_db: data/checkpoints.db
+  max_recursion_limit: 10
 llm:
-  provider: "ollama"              # ollama | openai
-  model_name: "qwen2.5:7b"
-  base_url: "http://localhost:11434"
-  temperature: 0.1
+  base_url: http://localhost:11434
   max_tokens: 4096
+  model_name: qwen2.5:7b
+  openai_api_key: ''
+  openai_base_url: ''
+  provider: ollama
   request_timeout: 120
   streaming: true
-  openai_api_key: ""              # env: OPENAI_API_KEY
-  openai_base_url: ""
-
-embedding:
-  model_name: "BAAI/bge-m3"
-  device: "cpu"                   # cpu | cuda
-  normalize: true
-  batch_size: 32
-  dimension: 1024
-
-knowledge:
-  supported_extensions:
-    - ".md"
-    - ".txt"
-    - ".pdf"
-    - ".docx"
-    - ".csv"
-    - ".json"
-  max_file_size_mb: 10
-
+  temperature: 0.1
+logging:
+  console: true
+  file: data/logs/agentkb.log
+  level: INFO
+  log_tool_calls: true
+  retention: 7 days
+  rotation: 10 MB
 postgresql:
-  host: "127.0.0.1"
-  port: 5432
-  dbname: "agentkb"
-  user: "postgres"
-  password: "postgres"
-  pool_min: 2
+  dbname: agentkb
+  host: 127.0.0.1
+  password: postgres
   pool_max: 5
-
+  pool_min: 2
+  port: 5432
+  user: postgres
+reranker:
+  provider: "local"
+  model_name: "D:/ai-models/BAAI/bge-reranker-v2-m3"
 retrieval:
-  dense_weight: 0.6
   bm25_weight: 0.4
-  candidate_k: 20
+  candidate_k: 30
+  dense_weight: 0.6
   final_k: 5
   rrf_k: 60
-
-reranker:
-  provider: "bailian"              # bailian | local
-  model_name: "qwen3-vl-rerank"
-  base_url: "https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank"
-  api_key: ""                                 # env: DASHSCOPE_API_KEY
-  timeout: 30
-
-chunking:
-  semantic_threshold: 0.5
-  parent_size: 1024
-  child_size: 256
-  sliding_size: 512
-  sliding_overlap: 100
-
-eval:
-  testset_path: "data/eval/testset.json"
-  report_dir: "data/eval/reports"
-  questions_per_chunk: 2
-  generation_sample_size: 50
-  retrieval_k_values: [5, 10, 20]
-  judge_model: "qwen2.5:7b"
-
 web_search:
   enabled: true
-  engine: "duckduckgo"
+  engine: duckduckgo
   max_results: 5
   timeout: 10
-
-logging:
-  level: "INFO"
-  file: "data/logs/agentkb.log"
-  rotation: "10 MB"
-  retention: "7 days"
-  console: true
-  log_tool_calls: true
-
-langgraph:
-  checkpointer_db: "data/checkpoints.db"
-  max_recursion_limit: 10
