@@ -104,6 +104,19 @@ class TestSet:
         logger.info(f"测试集已加载: {path}（{len(ts.items)} 条）")
         return ts
 
+    @classmethod
+    def from_queries(cls, queries: list[dict]) -> TestSet:
+        """从原始 query dict 列表构建 TestSet（用于 HTTP API 直接提交 queries）。"""
+        items = []
+        for q in queries:
+            items.append(TestItem(
+                query=q.get("query", ""),
+                relevant_chunk_ids=q.get("relevant_chunk_ids", []),
+                source_file=q.get("source_file", ""),
+                generated_by=q.get("generated_by", "human"),
+            ))
+        return cls(items=items, created_at=datetime.now(timezone.utc).isoformat())
+
     def validate(self) -> dict:
         """检查测试集数据完整性。
 
@@ -313,23 +326,56 @@ class TestSet:
         )
         return selected[:sample_size]
 
-    # ── LLM 客户端（直接用 httpx 调 Ollama API，绕开 langchain-ollama 兼容问题） ─
+    # ── LLM 客户端（用 httpx 直调 API，兼容 DeepSeek/Ollama） ──
 
     @staticmethod
     def _create_llm_client() -> dict:
-        """返回 LLM 调用所需的配置，直接用 httpx 调 Ollama API。"""
+        """返回 LLM 调用配置。"""
+        import os
         from agentkb.config.settings import Settings
         cfg = Settings.load()
         return {
+            "provider": cfg.llm_provider,
             "base_url": cfg.llm_base_url.rstrip("/"),
             "model": cfg.llm_model_name,
             "timeout": cfg.llm_request_timeout,
+            "api_key": os.getenv("DEEPSEEK_API_KEY", cfg._val("llm", "api_key", default="")),
         }
 
     @staticmethod
     def _llm_generate(client: dict, prompt: str) -> str:
-        """调用 Ollama API 生成文本。"""
+        """调用 LLM API 生成文本——自动适配 DeepSeek / Ollama。"""
         import httpx
+
+        provider = client.get("provider", "ollama")
+
+        if provider == "deepseek":
+            # DeepSeek OpenAI 兼容 API
+            try:
+                resp = httpx.post(
+                    f"{client['base_url']}/v1/chat/completions",
+                    json={
+                        "model": client["model"],
+                        "messages": [{"role": "user", "content": prompt}],
+                        "stream": False,
+                        "temperature": 0.1,
+                    },
+                    headers={
+                        "Authorization": f"Bearer {client.get('api_key', '')}",
+                        "Content-Type": "application/json",
+                    },
+                    timeout=client["timeout"],
+                )
+                if resp.status_code == 200:
+                    body = resp.json()
+                    return body["choices"][0]["message"]["content"]
+                logger.warning(f"DeepSeek API 返回 {resp.status_code}")
+                return ""
+            except Exception as e:
+                logger.warning(f"DeepSeek API 调用失败: {e}")
+                return ""
+
+        # Ollama 原生 API（兼容保留）
         try:
             resp = httpx.post(
                 f"{client['base_url']}/api/generate",

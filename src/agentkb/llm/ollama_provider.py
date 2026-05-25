@@ -15,7 +15,7 @@ class OllamaProvider(LLMProvider):
 
     def __init__(
         self,
-        model_name: str = "qwen2.5:7b",
+        model_name: str = "deepseek-chat",
         base_url: str = "http://localhost:11434",
         temperature: float = 0.1,
         max_tokens: int = 4096,

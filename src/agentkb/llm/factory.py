@@ -7,6 +7,7 @@ from langchain_core.language_models import BaseChatModel
 from agentkb.config.settings import Settings
 from agentkb.llm.base import LLMProvider
 from agentkb.llm.ollama_provider import OllamaProvider
+from agentkb.llm.deepseek_provider import DeepSeekProvider
 from agentkb.utils.exceptions import ConfigError
 
 
@@ -18,6 +19,15 @@ def create_llm(settings: Settings | None = None) -> LLMProvider:
     if provider == "ollama":
         return OllamaProvider(
             model_name=cfg.llm_model_name,
+            base_url=cfg.llm_base_url,
+            temperature=cfg.llm_temperature,
+            max_tokens=cfg.llm_max_tokens,
+            request_timeout=cfg.llm_request_timeout,
+        )
+    if provider == "deepseek":
+        return DeepSeekProvider(
+            model_name=cfg.llm_model_name,
+            api_key=cfg.llm_api_key or cfg.openai_api_key,
             base_url=cfg.llm_base_url,
             temperature=cfg.llm_temperature,
             max_tokens=cfg.llm_max_tokens,

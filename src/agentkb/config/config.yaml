@@ -19,7 +19,7 @@ embedding:
   normalize: true
 eval:
   generation_sample_size: 50
-  judge_model: qwen2.5:7b
+  judge_model: deepseek-chat
   questions_per_chunk: 2
   report_dir: data/eval/reports
   retrieval_k_values:
@@ -40,14 +40,15 @@ langgraph:
   checkpointer_db: data/checkpoints.db
   max_recursion_limit: 10
 llm:
-  base_url: http://localhost:11434
-  max_tokens: 4096
-  model_name: qwen2.5:7b
-  router_model_name: qwen2.5:3b
-  generator_model_name: qwen2.5:7b
+  provider: deepseek
+  model_name: deepseek-chat
+  router_model_name: deepseek-chat
+  generator_model_name: deepseek-chat
+  base_url: https://api.deepseek.com
+  api_key: "sk-5bd35832a9ea408a9791cb5ea81d70f0"
+  max_tokens: 8192
   openai_api_key: ''
   openai_base_url: ''
-  provider: ollama
   request_timeout: 120
   streaming: true
   temperature: 0.1
@@ -78,6 +79,44 @@ retrieval:
 mcp:
   enabled: false
   servers: []
+
+# ── V2 新增 ─────────────────────────────────────────────────
+
+# 多 Agent 配置
+agents:
+  supervisor_model: "deepseek-chat"
+  specialist_model: "deepseek-chat"
+  max_decomposition_depth: 3
+  reflection_enabled: true
+  reflection_rounds: 2
+
+# 可观测性
+observability:
+  enabled: true
+  exporters:
+    - console
+    - file
+    # - langfuse
+    # - langsmith
+    # - prometheus
+  langfuse:
+    public_key: ""
+    secret_key: ""
+    host: "https://cloud.langfuse.com"
+  langsmith:
+    api_key: ""
+    project: "agentkb"
+  prometheus:
+    port: 9090
+
+# 记忆系统
+memory:
+  working_memory_max_turns: 10
+  long_term_enabled: true
+  long_term_min_importance: 0.6
+
+# ────────────────────────────────────────────────────────────
+
 web_search:
   enabled: true
   engine: duckduckgo

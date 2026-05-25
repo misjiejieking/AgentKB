@@ -2,17 +2,26 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from agentkb.agent.graph import AgentGraph
 from agentkb.config.settings import Settings
 from agentkb.session.manager import SessionManager
 
 _agent_graph: AgentGraph | None = None
+_multi_agent_graph: Any = None  # MultiAgentGraph
 
 
 def init_graph(graph: AgentGraph) -> None:
     """启动时注入已构建的 AgentGraph。"""
     global _agent_graph
     _agent_graph = graph
+
+
+def init_multi_agent_graph(multi_graph) -> None:
+    """启动时注入 MultiAgentGraph。"""
+    global _multi_agent_graph
+    _multi_agent_graph = multi_graph
 
 
 def get_settings() -> Settings:
@@ -22,6 +31,11 @@ def get_settings() -> Settings:
 def get_graph() -> AgentGraph:
     assert _agent_graph is not None, "Graph not initialized"
     return _agent_graph
+
+
+def get_multi_agent_graph():
+    """获取 LangGraph Multi-Agent 图（可能为 None）。"""
+    return _multi_agent_graph
 
 
 def get_session_mgr() -> SessionManager:

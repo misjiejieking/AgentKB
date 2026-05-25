@@ -27,6 +27,9 @@ data/*.db
 .env
 .env.local
 
+# Config with secrets
+src/agentkb/config/config.yaml
+
 # OS
 Thumbs.db
 .DS_Store

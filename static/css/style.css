@@ -454,6 +454,36 @@ body {
   background: #fef2f2;
 }
 
+/* Agent 模式切换按钮 */
+.btn-mode {
+  height: 32px;
+  padding: 0 12px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all var(--transition);
+  white-space: nowrap;
+}
+
+.btn-mode:hover {
+  border-color: var(--primary-light);
+  color: var(--primary);
+}
+
+.btn-mode.active {
+  background: var(--primary-bg);
+  border-color: var(--primary);
+  color: var(--primary);
+  font-weight: 600;
+}
+
 /* ══════════════════════════════════════════════════════════════
    聊天区
    ══════════════════════════════════════════════════════════════ */

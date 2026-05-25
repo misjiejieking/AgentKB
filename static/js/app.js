@@ -9,6 +9,7 @@ let sessionId = localStorage.getItem("agentkb_session_id") || "";
 let isStreaming = false;
 let sidebarVisible = true;
 let lastEventId = 0;  // SSE 断点续传：当前会话最后收到的 event id
+let agentMode = localStorage.getItem("agentkb_agent_mode") || "auto";  // "auto" | "simple"
 
 // ══════════════════════════════════════════════════════════════
 //  DOM 引用
@@ -687,7 +688,7 @@ async function sendMessage(text) {
     const response = await fetch("/api/chat/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: text, session_id: sessionId }),
+      body: JSON.stringify({ message: text, session_id: sessionId, mode: agentMode }),
     });
 
     const reader = response.body.getReader();
@@ -726,22 +727,40 @@ async function sendMessage(text) {
               break;
 
             case "tool_start":
-              toolLines.push(
-                '<span class="spinner"></span> 正在调用 <b>' +
-                  escapeHtml(event.name) +
-                  "</b>……"
-              );
+              // 区分 Supervisor 和普通工具/Agent
+              if (event.name === "supervisor") {
+                toolLines.push(
+                  '🧠 <b>Supervisor</b> 分析意图中……'
+                );
+              } else if (["content_creator", "task_manager", "learning_tutor", "social_writer", "knowledge_agent"].includes(event.name)) {
+                const agentLabels = {
+                  content_creator: "内容创作 Agent",
+                  task_manager: "任务管理 Agent",
+                  learning_tutor: "学习导师 Agent",
+                  social_writer: "社媒内容 Agent",
+                  knowledge_agent: "知识检索 Agent",
+                };
+                toolLines.push(
+                  '🤖 <b>' + (agentLabels[event.name] || event.name) + '</b> 工作中……'
+                );
+              } else {
+                toolLines.push(
+                  '<span class="spinner"></span> 正在调用 <b>' +
+                    escapeHtml(event.name) +
+                    "</b>……"
+                );
+              }
               flushContent();
               break;
 
             case "tool_end":
               toolLines = toolLines.map((l) =>
-                l.replace('class="spinner"', 'class="done-icon"').replace(
-                  "正在调用",
-                  "已完成"
-                )
+                l.replace('class="spinner"', 'class="done-icon"')
+                  .replace("正在调用", "已完成")
+                  .replace("分析意图中……", "分析完成")
+                  .replace("工作中……", "已完成")
               );
-              // 提取检索来源和统计信息
+              // 提取检索来源 (search_knowledge_base)
               if (event.name === "search_knowledge_base") {
                 try {
                   const output = typeof event.output === "string"
@@ -1026,6 +1045,36 @@ document.addEventListener("drop", (e) => {
     uploadFiles(e.dataTransfer.files);
   }
 });
+
+// ── Agent 模式切换 ────────────────────────────────────────────
+
+const modeToggle = document.getElementById("btn-mode-toggle");
+const modeLabel = document.getElementById("mode-label");
+
+if (modeToggle) {
+  updateModeUI();
+  modeToggle.addEventListener("click", () => {
+    agentMode = agentMode === "auto" ? "simple" : "auto";
+    localStorage.setItem("agentkb_agent_mode", agentMode);
+    updateModeUI();
+    showToast(
+      agentMode === "auto" ? "已切换到多 Agent 协作模式" : "已切换到单 Agent 模式",
+      "info", 2000
+    );
+  });
+}
+
+function updateModeUI() {
+  if (modeToggle && modeLabel) {
+    if (agentMode === "auto") {
+      modeLabel.textContent = "🧠 多Agent";
+      modeToggle.classList.add("active");
+    } else {
+      modeLabel.textContent = "🤖 单Agent";
+      modeToggle.classList.remove("active");
+    }
+  }
+}
 
 // ── 启动 ──────────────────────────────────────────────────────
 init();

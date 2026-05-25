@@ -114,6 +114,10 @@ class Settings:
         return self._val("llm", "base_url")
 
     @property
+    def llm_api_key(self) -> str:
+        return os.getenv("DEEPSEEK_API_KEY", self._val("llm", "api_key", default=""))
+
+    @property
     def llm_temperature(self) -> float:
         return self._val("llm", "temperature")
 

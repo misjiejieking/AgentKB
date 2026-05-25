@@ -68,6 +68,48 @@ CREATE TABLE IF NOT EXISTS feedback (
     query TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+-- V2 新增: 长期记忆表
+CREATE TABLE IF NOT EXISTS long_term_memories (
+    id TEXT PRIMARY KEY,
+    content TEXT NOT NULL,
+    category TEXT NOT NULL DEFAULT 'general',
+    importance REAL NOT NULL DEFAULT 0.5,
+    source_session TEXT NOT NULL DEFAULT '',
+    embedding vector(1024),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_accessed TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    access_count INT NOT NULL DEFAULT 0
+);
+
+-- V2 新增: Agent 执行日志表
+CREATE TABLE IF NOT EXISTS agent_executions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    trace_id TEXT NOT NULL,
+    session_id TEXT NOT NULL DEFAULT '',
+    agent_name TEXT NOT NULL,
+    intent TEXT NOT NULL DEFAULT '',
+    query TEXT NOT NULL DEFAULT '',
+    output TEXT NOT NULL DEFAULT '',
+    success BOOLEAN NOT NULL DEFAULT true,
+    elapsed_ms REAL NOT NULL DEFAULT 0,
+    tokens_used INT NOT NULL DEFAULT 0,
+    tool_calls_count INT NOT NULL DEFAULT 0,
+    error TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- V2 新增: Trace 持久化表
+CREATE TABLE IF NOT EXISTS traces (
+    trace_id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL DEFAULT '',
+    query TEXT NOT NULL DEFAULT '',
+    data JSONB NOT NULL DEFAULT '{}',
+    total_elapsed_ms REAL NOT NULL DEFAULT 0,
+    total_tokens INT NOT NULL DEFAULT 0,
+    total_tool_calls INT NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 """
 
 # 索引 DDL（与建表分离，HNSW 索引创建较慢）
@@ -82,6 +124,14 @@ CREATE INDEX IF NOT EXISTS idx_messages_session
     ON messages(session_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_knowledge_files_status
     ON knowledge_files(status);
+CREATE INDEX IF NOT EXISTS idx_long_term_memories_embedding
+    ON long_term_memories USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS idx_agent_executions_trace
+    ON agent_executions(trace_id);
+CREATE INDEX IF NOT EXISTS idx_agent_executions_session
+    ON agent_executions(session_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_traces_session
+    ON traces(session_id, created_at);
 """
 
 

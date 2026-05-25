@@ -1,0 +1,67 @@
+name: Eval Regression Check
+
+on:
+  pull_request:
+    paths:
+      - 'src/agentkb/knowledge/**'
+      - 'src/agentkb/tools/knowledge_search.py'
+      - 'src/agentkb/agent/**'
+  push:
+    branches: [main]
+    paths:
+      - 'src/agentkb/knowledge/**'
+      - 'src/agentkb/tools/knowledge_search.py'
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_DB: agentkb
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install sentence-transformers
+
+      - name: Generate testset (if missing)
+        run: |
+          if [ ! -f data/eval/testset.json ]; then
+            python -m agentkb.eval generate --sample-size 20 || echo "Testset generation skipped (needs LLM)"
+          fi
+
+      - name: Run eval with baseline check
+        run: |
+          python -m agentkb.eval run --output data/eval/ci_eval.json --diff-baseline data/eval/baseline.json || {
+            echo "======= Regression detected ======="
+            exit 1
+          }
+
+      - name: Upload eval report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: eval-reports
+          path: |
+            data/eval/ci_eval.json
+            data/eval/ci_eval.md
+            data/eval/ci_eval.diff.md
