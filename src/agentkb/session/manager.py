@@ -108,12 +108,15 @@ class SessionManager:
         for m in messages:
             role = m.get("role", "")
             content = m.get("content", "")
-            if role == "user":
+            if role in ("user", "human"):
                 lc_messages.append(HumanMessage(content=content))
-            elif role == "assistant":
+            elif role in ("assistant", "ai"):
                 ai_msg = AIMessage(content=content)
                 if m.get("tool_calls"):
                     ai_msg.tool_calls = m["tool_calls"]
+                # 跳过纯空内容的 AI 消息（草稿），但保留带 tool_calls 的
+                if (not content or not content.strip()) and not m.get("tool_calls"):
+                    continue
                 lc_messages.append(ai_msg)
             elif role == "tool":
                 lc_messages.append(ToolMessage(

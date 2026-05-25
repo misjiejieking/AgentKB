@@ -74,12 +74,13 @@ async def agent_node(
             except asyncio.TimeoutError:
                 logger.error("LLM 调用超时")
                 return {"messages": [AIMessage(content=FALLBACK_MESSAGE)]}
+            content = getattr(response, "content", "")
+            if isinstance(content, str) and not content.strip():
+                return {"messages": [AIMessage(content=FALLBACK_MESSAGE)]}
             return {"messages": [response]}
 
     # 非 chat 意图或后续轮次：正常绑工具调用
     llm_with_tools = llm.bind_tools(tools) if tools else llm
-
-    logger.debug(f"agent_node: 用 {len(invoke_messages)} 条消息调用 LLM（绑工具）")
 
     try:
         response: BaseMessage = await asyncio.wait_for(
@@ -91,6 +92,11 @@ async def agent_node(
         return {"messages": [AIMessage(content=FALLBACK_MESSAGE)]}
     except Exception as exc:
         logger.error(f"LLM 调用异常: {exc}")
+        return {"messages": [AIMessage(content=FALLBACK_MESSAGE)]}
+
+    # 空内容兜底
+    content = getattr(response, "content", "")
+    if isinstance(content, str) and not content.strip() and not getattr(response, "tool_calls", None):
         return {"messages": [AIMessage(content=FALLBACK_MESSAGE)]}
 
     return {"messages": [response]}

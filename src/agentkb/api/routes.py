@@ -13,7 +13,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from loguru import logger
 
-from agentkb.api.deps import get_graph, get_settings, get_session_mgr
+from agentkb.api.deps import get_graph, get_multi_agent_graph, get_settings, get_session_mgr
 from agentkb.knowledge.cache import get_cache
 from agentkb.knowledge.embedder import get_embedder
 from agentkb.knowledge.loader import FileLoader
@@ -111,6 +111,7 @@ def _get_or_create_stream(session_id: str, ai_msg_id: str = "") -> SessionStream
 class ChatRequest(BaseModel):
     message: str
     session_id: str = Field(default="default")
+    mode: str = Field(default="auto", description="Agent模式: auto=多Agent协作, simple=单Agent")
 
 
 class ClearSessionRequest(BaseModel):
@@ -123,9 +124,10 @@ class ClearSessionRequest(BaseModel):
 
 @router.post("/chat/stream")
 async def chat_stream(req: ChatRequest):
-    """发起新对话，启动 LLM 后台任务。"""
+    """发起新对话，启动 LLM 后台任务。支持多 Agent 模式。"""
     session_mgr = get_session_mgr()
     graph = get_graph()
+    multi_agent_graph = get_multi_agent_graph()
 
     session_mgr.ensure_session(req.session_id)
     session_mgr.save_message(req.session_id, "human", req.message)
@@ -137,60 +139,22 @@ async def chat_stream(req: ChatRequest):
     stream = _get_or_create_stream(req.session_id, ai_msg_id)
     stream.push({"type": "message_id", "message_id": ai_msg_id})
 
+    use_multi_agent = req.mode == "auto" and multi_agent_graph is not None
+
     async def run_llm():
-        accumulated = ""
-        token_count = 0
         try:
-            async for event in graph.stream(
-                user_input=req.message,
-                session_id=req.session_id,
-                thread_id=req.session_id,
-            ):
-                stream.push(event)
-                if event["type"] == "token":
-                    accumulated += event["content"]
-                    token_count += 1
-                    if token_count % 5 == 0:
-                        db.update_message_content(ai_msg_id, accumulated)
-                elif event["type"] == "done":
-                    db.update_message_content(ai_msg_id, accumulated)
-                elif event["type"] == "error":
-                    if accumulated:
-                        db.update_message_content(ai_msg_id, accumulated)
-            stream.finish()
+            if use_multi_agent:
+                await _run_multi_agent(req, stream, db, ai_msg_id)
+            else:
+                await _run_single_agent(req, graph, stream, db, ai_msg_id)
         except Exception as exc:
             logger.error(f"LLM 后台任务出错: {exc}", exc_info=True)
-            if accumulated:
-                db.update_message_content(ai_msg_id, accumulated)
             stream.push({"type": "error", "message": str(exc)})
             stream.finish()
 
     asyncio.ensure_future(run_llm())
 
-    q = stream.subscribe()
-    try:
-        async def new_stream():
-            event_id = 0
-            try:
-                while True:
-                    event = await q.get()
-                    if event is None:
-                        break
-                    event_id += 1
-                    yield f"id: {event_id}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
-            except asyncio.CancelledError:
-                pass
-            finally:
-                stream.unsubscribe(q)
-
-        return StreamingResponse(
-            new_stream(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
-    except Exception:
-        stream.unsubscribe(q)
-        raise
+    return _sse_response(stream)
 
 
 @router.get("/chat/stream/{session_id}")
@@ -434,3 +398,165 @@ def get_trace(trace_id: str):
         from fastapi.responses import JSONResponse
         return JSONResponse({"error": "trace not found"}, status_code=404)
     return record.to_dict()
+
+
+# ── 指标 ──────────────────────────────────────────────────────────
+
+
+@router.get("/metrics")
+def get_metrics():
+    """Prometheus 格式的指标端点。"""
+    from fastapi.responses import PlainTextResponse
+    try:
+        from agentkb.observability.metrics import get_metrics as gm
+        text = gm().to_prometheus_text()
+        return PlainTextResponse(text, media_type="text/plain")
+    except ImportError:
+        return PlainTextResponse("# metrics module not available\n", media_type="text/plain")
+
+
+# ── 健康检查 ──────────────────────────────────────────────────────
+
+
+@router.get("/health")
+def health_check():
+    """健康检查端点——返回各组件状态。"""
+    status = {"status": "ok", "components": {}}
+
+    # PG 数据库
+    try:
+        from agentkb.storage.pg_database import get_db
+        db = get_db()
+        with db._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+        status["components"]["postgresql"] = "ok"
+    except Exception as e:
+        status["components"]["postgresql"] = f"error: {e}"
+        status["status"] = "degraded"
+
+    # LLM
+    try:
+        from agentkb.llm.factory import get_chat_model
+        get_chat_model(streaming=False)
+        status["components"]["llm"] = "ok"
+    except Exception as e:
+        status["components"]["llm"] = f"error: {e}"
+        status["status"] = "degraded"
+
+    # Embedder
+    try:
+        from agentkb.knowledge.embedder import get_embedder
+        get_embedder()
+        status["components"]["embedder"] = "ok"
+    except Exception as e:
+        status["components"]["embedder"] = f"error: {e}"
+        status["status"] = "degraded"
+
+    return status
+
+
+# ══════════════════════════════════════════════════════════════
+#  聊天 SSE 辅助函数
+# ══════════════════════════════════════════════════════════════
+
+def _sse_response(stream: SessionStream):
+    """为 SessionStream 创建 SSE StreamingResponse。"""
+    q = stream.subscribe()
+    try:
+        async def event_generator():
+            event_id = 0
+            try:
+                while True:
+                    event = await q.get()
+                    if event is None:
+                        break
+                    event_id += 1
+                    yield f"id: {event_id}\ndata: {json.dumps(event, ensure_ascii=False)}\n\n"
+            except asyncio.CancelledError:
+                pass
+            finally:
+                stream.unsubscribe(q)
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+    except Exception:
+        stream.unsubscribe(q)
+        raise
+
+
+async def _run_single_agent(req: ChatRequest, graph, stream: SessionStream, db, ai_msg_id: str):
+    """原有单 Agent 模式——LangGraph ReAct loop 流式执行。"""
+    from agentkb.config.settings import Settings
+    cfg = Settings.load()
+    accumulated = ""
+    token_count = 0
+    # thread_id 加模型名后缀，切换 LLM 时自动隔离旧格式的对话状态
+    thread_id = f"{req.session_id}:{cfg.llm_model_name}"
+    async for event in graph.stream(
+        user_input=req.message,
+        session_id=req.session_id,
+        thread_id=thread_id,
+    ):
+        stream.push(event)
+        if event["type"] == "token":
+            accumulated += event["content"]
+            token_count += 1
+            if token_count % 5 == 0:
+                db.update_message_content(ai_msg_id, accumulated)
+        elif event["type"] == "done":
+            db.update_message_content(ai_msg_id, accumulated)
+        elif event["type"] == "error":
+            if accumulated:
+                db.update_message_content(ai_msg_id, accumulated)
+    stream.finish()
+
+
+async def _run_multi_agent(req: ChatRequest, stream: SessionStream, db, ai_msg_id: str):
+    """多 Agent 模式——LangGraph StateGraph 流式执行。
+
+    通过 MultiAgentGraph.stream() 获取 astream_events v2 事件，
+    直接推入 SessionStream。LangGraph checkpointer 自动管理对话历史。
+    """
+    from agentkb.api.deps import get_multi_agent_graph
+    from agentkb.session.manager import SessionManager
+
+    multi_graph = get_multi_agent_graph()
+    if multi_graph is None:
+        stream.push({"type": "error", "message": "MultiAgentGraph 未初始化"})
+        stream.finish()
+        return
+
+    # 加载历史消息作为 LangChain 消息列表，注入到图的初始 state
+    session_mgr = SessionManager()
+    all_messages = session_mgr.load_messages(req.session_id)
+    history_lc = session_mgr.dict_to_langchain(
+        [m for m in all_messages if (m.get("content") or "").strip()][:-1]  # 排除当前 human
+    )
+
+    accumulated = ""
+    try:
+        async for event in multi_graph.stream(
+            user_input=req.message,
+            session_id=req.session_id,
+            thread_id=req.session_id,
+            history=history_lc,
+        ):
+            stream.push(event)
+            if event["type"] == "token":
+                accumulated += event["content"]
+            elif event["type"] == "done":
+                db.update_message_content(ai_msg_id, accumulated)
+            elif event["type"] == "error":
+                if accumulated:
+                    db.update_message_content(ai_msg_id, accumulated)
+        stream.finish()
+    except Exception as exc:
+        logger.error(f"Multi-Agent 执行异常: {exc}", exc_info=True)
+        if accumulated:
+            db.update_message_content(ai_msg_id, accumulated)
+        stream.push({"type": "error", "message": str(exc)})
+        stream.finish()

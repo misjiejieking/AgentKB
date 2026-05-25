@@ -4,12 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import time
-import aiosqlite
-from pathlib import Path
 from typing import AsyncGenerator, Any
 
 from langchain_core.messages import AIMessage, HumanMessage
-from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 from langgraph.graph import StateGraph, END
 from loguru import logger
 
@@ -31,8 +28,11 @@ def _should_continue(state: AgentState) -> str:
 
 
 async def build_graph(checkpointer_path: str = "data/checkpoints.db") -> StateGraph:
-    """构建并编译 LangGraph 状态图（异步检查点器）。"""
-    workflow = StateGraph(dict)
+    """构建并编译 LangGraph 状态图（MemorySaver，避免序列化丢字段）。"""
+    from langgraph.checkpoint.memory import MemorySaver
+    from langgraph.graph import MessagesState
+
+    workflow = StateGraph(MessagesState)
 
     workflow.add_node("agent", agent_node)
     workflow.add_node("tools", tools_node)
@@ -46,12 +46,7 @@ async def build_graph(checkpointer_path: str = "data/checkpoints.db") -> StateGr
     )
     workflow.add_edge("tools", "agent")
 
-    Path(checkpointer_path).parent.mkdir(parents=True, exist_ok=True)
-    conn = await aiosqlite.connect(checkpointer_path)
-    checkpointer = AsyncSqliteSaver(conn)
-
-    max_recursion = Settings.load().langgraph_max_recursion_limit
-    return workflow.compile(checkpointer=checkpointer)
+    return workflow.compile(checkpointer=MemorySaver())
 
 
 class AgentGraph:
@@ -71,20 +66,24 @@ class AgentGraph:
         user_input: str,
         session_id: str = "default",
         thread_id: str = "default",
+        history: list | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
-        """流式执行 Agent 并逐事件 yield。"""
+        """流式执行 Agent 并逐事件 yield。
+
+        history: 可选的历史消息列表（LangChain 格式），替换模型后首次调用时传入，
+                避免 checkpointer 隔离导致 LLM 丢失上下文。
+        """
         if self._graph is None:
             self._graph = await build_graph()
 
-        # 启动链路追踪
         trace = start_trace(session_id=session_id, query=user_input)
 
-        input_state = {
-            "session_id": session_id,
-            "messages": [HumanMessage(content=user_input)],
-        }
+        input_messages = list(history) if history else []
+        input_messages.append(HumanMessage(content=user_input))
+        input_state = {"session_id": session_id, "messages": input_messages}
         config = {"configurable": {"thread_id": thread_id}}
 
+        has_tokens = False
         try:
             async for event in self._graph.astream_events(
                 input_state, config, version="v2"
@@ -93,6 +92,7 @@ class AgentGraph:
                 if kind == "on_chat_model_stream":
                     chunk = event["data"]["chunk"]
                     if hasattr(chunk, "content") and chunk.content:
+                        has_tokens = True
                         yield {"type": "token", "content": chunk.content, "trace_id": trace.trace_id}
 
                 elif kind == "on_tool_start":
@@ -118,6 +118,16 @@ class AgentGraph:
                         "trace_id": trace.trace_id,
                         "trace": trace.to_dict(),
                     }
+
+            # 如果没有流式 token（ainvoke 模式），从最终 state 提取回复
+            if not has_tokens:
+                final_state = self._graph.get_state(config)
+                if final_state and final_state.values:
+                    final_msgs = final_state.values.get("messages", [])
+                    for m in reversed(final_msgs):
+                        if isinstance(m, AIMessage) and getattr(m, "content", ""):
+                            yield {"type": "token", "content": str(m.content), "trace_id": trace.trace_id}
+                            break
 
             trace.add_event("done", {"session_id": session_id})
             yield {"type": "done", "session_id": session_id, "trace_id": trace.trace_id, "trace": trace.to_dict()}
