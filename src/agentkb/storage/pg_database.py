@@ -54,8 +54,18 @@ CREATE TABLE IF NOT EXISTS knowledge_chunks (
     content TEXT NOT NULL,
     parent_content TEXT,
     embedding vector(1024),
-    fts_vector tsvector GENERATED ALWAYS AS (to_tsvector('simple', content)) STORED,
+    fts_vector tsvector,
     chunk_metadata JSONB DEFAULT '{}',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS feedback (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    session_id TEXT NOT NULL DEFAULT '',
+    message_id TEXT NOT NULL DEFAULT '',
+    rating TEXT NOT NULL CHECK(rating IN ('up','down')),
+    reason TEXT NOT NULL DEFAULT '',
+    query TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 """
@@ -289,18 +299,22 @@ class Database:
     # ══════════════════════════════════════════════════════════════
 
     def upsert_chunks(self, chunks: list[dict]) -> None:
-        """批量插入知识块，每个 dict: {file_id, chunk_index, content, parent_content, embedding, chunk_metadata}。"""
+        """批量插入知识块，写入时 jieba 分词 → to_tsvector。"""
+        import jieba
         with self._connect() as conn:
             with conn.cursor() as cur:
                 for c in chunks:
+                    content = c["content"]
+                    segmented = " ".join(jieba.cut(content))
                     meta_json = json.dumps(c.get("chunk_metadata", {}), ensure_ascii=False)
                     cur.execute(
                         """INSERT INTO knowledge_chunks
-                           (file_id, chunk_index, content, parent_content, embedding, chunk_metadata)
-                           VALUES (%s, %s, %s, %s, %s, %s)""",
+                           (file_id, chunk_index, content, parent_content, embedding, chunk_metadata, fts_vector)
+                           VALUES (%s, %s, %s, %s, %s, %s, to_tsvector('simple', %s))""",
                         (
-                            c["file_id"], c["chunk_index"], c["content"],
+                            c["file_id"], c["chunk_index"], content,
                             c.get("parent_content"), c["embedding"], meta_json,
+                            segmented,
                         ),
                     )
         logger.debug(f"Upserted {len(chunks)} chunks")
@@ -320,10 +334,16 @@ class Database:
                 return [dict(r) for r in cur.fetchall()]
 
     def search_bm25(self, query_text: str, limit: int = 20) -> list[dict]:
-        """PG 全文检索（tsvector/tsquery）。"""
+        """BM25 近似搜索：jieba 分词后走 PG tsvector/tsquery + GIN 倒排索引。
+
+        写入时 jieba 分词已存入 fts_vector，查询时同样分词后用 tsquery 匹配。
+        ts_rank 提供专业的 TF/IDF 排序，GIN 索引保证 O(logN) 而非全表扫描。
+        """
+        import jieba
+        segmented = " ".join(jieba.cut(query_text))
+
         with self._connect() as conn:
             with conn.cursor() as cur:
-                # plainto_tsquery 自动处理空格分隔的中文词
                 cur.execute(
                     """SELECT id, file_id, chunk_index, content, parent_content, chunk_metadata,
                               ts_rank(fts_vector, plainto_tsquery('simple', %s)) AS score
@@ -331,7 +351,7 @@ class Database:
                        WHERE fts_vector @@ plainto_tsquery('simple', %s)
                        ORDER BY score DESC
                        LIMIT %s""",
-                    (query_text, query_text, limit),
+                    (segmented, segmented, limit),
                 )
                 return [dict(r) for r in cur.fetchall()]
 
@@ -342,6 +362,23 @@ class Database:
                     "DELETE FROM knowledge_chunks WHERE file_id = %s", (file_id,)
                 )
                 return cur.rowcount
+
+
+    # ══════════════════════════════════════════════════════════════
+    #  feedback
+    # ══════════════════════════════════════════════════════════════
+
+    def add_feedback(
+        self, session_id: str, rating: str, reason: str = "",
+        query: str = "", message_id: str = "",
+    ) -> None:
+        with self._connect() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """INSERT INTO feedback (session_id, message_id, rating, reason, query)
+                       VALUES (%s, %s, %s, %s, %s)""",
+                    (session_id, message_id, rating, reason, query),
+                )
 
 
 # 模块级单例

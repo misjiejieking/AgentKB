@@ -14,6 +14,7 @@ from pydantic import BaseModel, Field
 from loguru import logger
 
 from agentkb.api.deps import get_graph, get_settings, get_session_mgr
+from agentkb.knowledge.cache import get_cache
 from agentkb.knowledge.embedder import get_embedder
 from agentkb.knowledge.loader import FileLoader
 from agentkb.knowledge.splitter import TextSplitter
@@ -21,6 +22,21 @@ from agentkb.storage.pg_database import get_db
 from agentkb.storage.models import new_id
 
 router = APIRouter()
+
+
+def _clean_text(text: str) -> str:
+    """文本清洗：去中文字间空格、合并空白、过滤无意义短 chunk。"""
+    import re
+    # 移除中文字间的空格（PDF 提取常见问题：员 工 手 册 → 员工手册）
+    text = re.sub(r"(?<=[一-鿿]) (?=[一-鿿])", "", text)
+    # 合并连续空白（空格、制表符、全角空格）
+    text = re.sub(r"[　\t ]+", " ", text)
+    text = text.strip()
+    # 移除纯数字/标点行
+    text = re.sub(r"^\d+[\.\)、]?\s*$", "", text, flags=re.MULTILINE)
+    # 合并多余换行
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 # ══════════════════════════════════════════════════════════════
@@ -119,6 +135,7 @@ async def chat_stream(req: ChatRequest):
     db.add_message(msg_id=ai_msg_id, session_id=req.session_id, role="ai", content="")
 
     stream = _get_or_create_stream(req.session_id, ai_msg_id)
+    stream.push({"type": "message_id", "message_id": ai_msg_id})
 
     async def run_llm():
         accumulated = ""
@@ -261,6 +278,10 @@ async def upload_files(files: list[UploadFile] = File(...)):
 
             docs = loader.load(str(saved_path))
             chunks = splitter.split(docs)
+            # 文本清洗：合并多余空白、去除首尾空格、过滤纯标点/数字的无效 chunk
+            for c in chunks:
+                c.page_content = _clean_text(c.page_content)
+            chunks = [c for c in chunks if len(c.page_content) >= 10]
             texts = [c.page_content for c in chunks]
             embeddings = embedder.embed_documents(texts)
 
@@ -292,6 +313,10 @@ async def upload_files(files: list[UploadFile] = File(...)):
             logger.error(f"File upload error: {exc}", exc_info=True)
             results.append({"status": "error", "filename": file.filename, "error": str(exc)})
 
+    # 知识库变更 → 失效检索缓存
+    if any(r["status"] == "ok" for r in results):
+        get_cache().invalidate()
+
     return {"results": results}
 
 
@@ -312,6 +337,7 @@ def delete_file(file_id: str):
     db = get_db()
     db.delete_knowledge_file(file_id)
     deleted_count = db.delete_chunks_by_file_id(file_id)
+    get_cache().invalidate()
     return {"deleted": True, "file_id": file_id, "vectors_removed": deleted_count}
 
 
@@ -372,3 +398,39 @@ def clear_session(req: ClearSessionRequest):
     session_mgr.clear_session(req.session_id)
     new_sid = new_id()
     return {"session_id": new_sid, "title": "New Chat"}
+
+
+class FeedbackRequest(BaseModel):
+    session_id: str = ""
+    rating: str = ""
+    reason: str = ""
+    query: str = ""
+    message_id: str = ""
+
+
+@router.post("/feedback")
+def submit_feedback(req: FeedbackRequest):
+    """记录用户反馈。"""
+    db = get_db()
+    db.add_feedback(
+        session_id=req.session_id,
+        rating=req.rating,
+        reason=req.reason,
+        query=req.query,
+        message_id=req.message_id,
+    )
+    return {"ok": True}
+
+
+# ── 链路追踪 ────────────────────────────────────────────────────
+
+
+@router.get("/trace/{trace_id}")
+def get_trace(trace_id: str):
+    """返回指定 trace_id 的完整调用链路。"""
+    from agentkb.utils.tracer import TraceRecord
+    record = TraceRecord.load(trace_id)
+    if record is None:
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"error": "trace not found"}, status_code=404)
+    return record.to_dict()

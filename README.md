@@ -4,10 +4,13 @@
 
 ## 功能
 
-- **智能对话**：自然语言提问，流式 Markdown 回复（SSE）
-- **知识库**：上传 .md / .txt / .pdf / .docx / .csv / .json 文件，混合检索（稠密向量 + BM25） + 重排序
-- **联网搜索**：DuckDuckGo 搜索作为补充
-- **多会话**：完整的会话生命周期管理
+- **智能对话**：自然语言提问，流式 Markdown 回复（SSE + 断点续传）
+- **知识库**：上传 .md / .txt / .pdf / .docx / .csv / .json，混合检索（pgvector dense + jieba BM25 + RRF 融合）+ 重排序
+- **多策略分块**：滑动窗口 / 语义分块 / 父子分块，自动根据文档特征选择
+- **文本清洗**：自动去除 PDF 中文字间空格、合并空白、过滤噪音内容
+- **联网搜索**：DuckDuckGo（含 DDG Lite 回退）
+- **多会话**：完整的会话生命周期管理，刷新/断线不丢回复
+- **评估框架**：自动化测试集生成 + Recall/Precision/MRR/NDCG 指标 + 对比报告
 - **本地运行**：无需 Docker，一键启动，数据不上云
 
 ## 快速开始
@@ -65,16 +68,37 @@ python -m agentkb.main
 src/agentkb/
 ├── main.py              # 入口
 ├── config/              # 配置系统
-├── agent/               # LangGraph 状态机
-├── api/                 # FastAPI REST API（SSE 流式传输）
+├── agent/               # LangGraph 状态机 + 查询重写
+├── api/                 # FastAPI REST API（SSE 流式 + 断点续传）
 ├── llm/                 # LLM Provider
-├── tools/               # 工具系统
-├── knowledge/           # 知识库管道（加载→分块→嵌入→检索→重排序）
+├── tools/               # 工具系统（知识检索 / 联网搜索）
+├── knowledge/           # 知识库管道（加载→清洗→分块→嵌入→混合检索→重排序→缓存）
+├── eval/                # 评估框架（测试集生成 / 指标计算 / 对比报告）
 ├── session/             # 会话管理
 ├── storage/             # PostgreSQL + pgvector 持久化
-├── ui/                  # 前端界面
 └── utils/               # 日志与异常
 ```
+
+## 评估
+
+```bash
+# 生成银标测试集（从知识库采样 → LLM 自动生成问题）
+PYTHONPATH="src" python -m agentkb.eval generate --sample-size 50
+
+# 跑评估（输出带中文注释的 Markdown 报告）
+PYTHONPATH="src" python -m agentkb.eval run
+
+# 对比两次结果
+PYTHONPATH="src" python -m agentkb.eval run --output baseline.json
+# 修改配置/参数后...
+PYTHONPATH="src" python -m agentkb.eval run --output after.json
+PYTHONPATH="src" python -m agentkb.eval compare --baseline baseline.json --current after.json
+
+# 从 JSON 重新生成报告
+PYTHONPATH="src" python -m agentkb.eval report --input eval_result.json --format md
+```
+
+评估指标：Recall@K（召回率）、Precision@K（精确率）、MRR（第一个正确答案排名）、NDCG@K（排序质量）。
 
 ## 配置
 

@@ -102,6 +102,14 @@ class Settings:
         return self._val("llm", "model_name")
 
     @property
+    def llm_router_model_name(self) -> str:
+        return self._val("llm", "router_model_name")
+
+    @property
+    def llm_generator_model_name(self) -> str:
+        return self._val("llm", "generator_model_name")
+
+    @property
     def llm_base_url(self) -> str:
         return self._val("llm", "base_url")
 
@@ -288,6 +296,16 @@ class Settings:
     @property
     def eval_judge_model(self) -> str:
         return self._val("eval", "judge_model")
+
+    # ── mcp ─────────────────────────────────────────────────────
+
+    @property
+    def mcp_enabled(self) -> bool:
+        return self._val("mcp", "enabled")
+
+    @property
+    def mcp_servers(self) -> list[dict]:
+        return self._val("mcp", "servers", default=[])
 
     # ── web search ──────────────────────────────────────────────
 

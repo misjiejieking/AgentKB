@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from loguru import logger
+
 from agentkb.config.settings import Settings
 from agentkb.knowledge.embedder import get_embedder
 from agentkb.storage.pg_database import get_db
@@ -15,27 +17,63 @@ class HybridRetriever:
         self._embedder = get_embedder()
 
     def retrieve(self, query: str) -> list[dict]:
-        """执行混合检索：dense + bm25 → RRF 融合 → 返回候选集。"""
+        """执行混合检索：dense + bm25 → RRF 融合 → 返回候选集，失败时逐级降级。"""
         cfg = Settings.load()
 
         # 1. 生成查询向量
         query_vector = self._embedder.embed_query(query)
 
-        # 2. 并行执行 dense 和 bm25 检索
-        dense_results = self._db.search_dense(query_vector, limit=cfg.retrieval_candidate_k)
-        bm25_results = self._db.search_bm25(query, limit=cfg.retrieval_candidate_k)
+        # 2. 分别检索，单侧失败不崩溃
+        dense_results = []
+        bm25_results = []
+        degraded = False
+        degrade_reason = ""
 
-        # 3. RRF 融合
-        merged = self._rrf_fusion(
-            dense_results,
-            bm25_results,
-            dense_weight=cfg.retrieval_dense_weight,
-            bm25_weight=cfg.retrieval_bm25_weight,
-            k=cfg.retrieval_rrf_k,
-        )
+        try:
+            dense_results = self._db.search_dense(query_vector, limit=cfg.retrieval_candidate_k)
+        except Exception as e:
+            logger.warning(f"Dense 检索失败，降级: {e}")
+            degraded = True
+            degrade_reason = "dense 检索异常"
 
-        # 4. 按 RRF 分数排序，返回 top candidate_k
-        merged.sort(key=lambda x: x.get("rrf_score", 0), reverse=True)
+        try:
+            bm25_results = self._db.search_bm25(query, limit=cfg.retrieval_candidate_k)
+        except Exception as e:
+            logger.warning(f"BM25 检索失败，降级: {e}")
+            degraded = True
+            degrade_reason = degrade_reason or "bm25 检索异常"
+
+        # 3. 三级降级融合
+        if dense_results and bm25_results:
+            merged = self._rrf_fusion(
+                dense_results,
+                bm25_results,
+                dense_weight=cfg.retrieval_dense_weight,
+                bm25_weight=cfg.retrieval_bm25_weight,
+                k=cfg.retrieval_rrf_k,
+            )
+        elif dense_results:
+            merged = dense_results  # 降级到 pure dense
+            degraded = True
+            degrade_reason = degrade_reason or "降级到 dense-only"
+            logger.info("BM25 不可用，降级到 pure dense")
+        elif bm25_results:
+            merged = bm25_results  # 降级到 pure bm25
+            degraded = True
+            degrade_reason = degrade_reason or "降级到 bm25-only"
+            logger.info("Dense 不可用，降级到 pure bm25")
+        else:
+            return []  # 全部失败
+
+        # 合并降级信息到每一条结果
+        if degraded:
+            for item in merged:
+                item["degraded"] = True
+                item["degrade_reason"] = degrade_reason
+
+        # 4. 按分数排序，返回 top candidate_k
+        sort_key = lambda x: x.get("rrf_score", x.get("score", 0))
+        merged.sort(key=sort_key, reverse=True)
         return merged[:cfg.retrieval_candidate_k]
 
     @staticmethod

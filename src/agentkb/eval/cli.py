@@ -115,6 +115,42 @@ def cmd_run(args) -> None:
     report_path.write_text(md, encoding="utf-8")
     logger.info(f"Markdown 报告: {report_path}")
 
+    # diff-baseline 对比模式：Recall@5 退化超过 2% 则 exit 1
+    if args.diff_baseline:
+        import json
+        from agentkb.eval.metrics import EvalResult
+        baseline_path = Path(args.diff_baseline)
+        if not baseline_path.exists():
+            logger.error(f"基线文件不存在: {baseline_path}")
+            return
+        baseline_data = json.loads(baseline_path.read_text(encoding="utf-8"))
+        bm = baseline_data.get("metrics", {})
+        baseline = EvalResult(
+            k_values=[int(k) for k in bm["recall_at_k"].keys()],
+            recall_at_k={int(k): v for k, v in bm["recall_at_k"].items()},
+            precision_at_k={int(k): v for k, v in bm.get("precision_at_k", {}).items()},
+            mrr=bm.get("mrr", 0),
+            ndcg_at_k={int(k): v for k, v in bm.get("ndcg_at_k", {}).items()},
+        )
+
+        from agentkb.eval.evaluator import Evaluator
+        diff = Evaluator.diff(baseline, result, args.diff_baseline, "current")
+
+        recall5_diff = next((d for d in diff.diffs if d.name == "Recall@5"), None)
+        if recall5_diff and recall5_diff.delta < -0.02:
+            logger.error(
+                f"Recall@5 退化 {abs(recall5_diff.delta):.3f} 超过阈值 0.02，CI 失败。"
+                f" 基线: {recall5_diff.baseline:.4f} → 当前: {recall5_diff.current:.4f}"
+            )
+            import sys
+            sys.exit(1)
+
+        md = render_diff_markdown(diff)
+        diff_path = output.with_suffix(".diff.md")
+        diff_path.write_text(md, encoding="utf-8")
+        logger.info(f"对比报告: {diff_path}")
+        logger.info("Recall@5 退化在阈值内，通过 ✅")
+
 
 def cmd_compare(args) -> None:
     """对比两次评估结果。"""
@@ -199,6 +235,62 @@ def cmd_report(args) -> None:
         logger.error(f"不支持的格式: {fmt}（支持 md / json）")
 
 
+async def cmd_generation(args) -> None:
+    """执行生成质量评估。"""
+    logger.info("正在执行生成质量评估……")
+
+    from agentkb.storage.pg_database import get_db
+    from agentkb.knowledge.embedder import get_embedder
+    from agentkb.llm.factory import get_chat_model
+    from agentkb.eval.testset import TestSet
+    from agentkb.eval.evaluator import Evaluator
+
+    cfg = Settings.load()
+    _ensure_dirs()
+
+    testset_path = args.testset or cfg.eval_testset_path
+    testset = TestSet.load(testset_path)
+    testset.items = testset.items[:args.sample_size]
+
+    get_db()
+    get_embedder()
+    llm = get_chat_model(streaming=False)
+
+    evaluator = Evaluator()
+    result = await evaluator.evaluate_full(testset, llm_client=llm)
+
+    # 保存
+    import json
+    output = Path(args.output or "data/eval/latest_generation_eval.json")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    print()
+    print("=" * 60)
+    print("  生成质量评估摘要")
+    print("=" * 60)
+    gen = result["generation"]
+    print(f"  平均 Faithfulness:     {gen['avg_faithfulness']:.3f}  (答案是否来自上下文)")
+    print(f"  平均 Answer Relevance:  {gen['avg_answer_relevance']:.3f}  (答案是否回答正确)")
+    print(f"  平均 Context Relevance: {gen['avg_context_relevance']:.3f}  (上下文是否相关)")
+    print(f"  评估样本数:             {gen['total_evaluated']}")
+    print("=" * 60)
+
+    # 标记低 quality case
+    low_quality = [
+        (i, m) for i, m in enumerate(gen.get("per_sample", []))
+        if m["faithfulness"] < 0.4
+    ]
+    if low_quality:
+        print()
+        print(f"  低忠实度样本（Faithfulness < 0.4）: {len(low_quality)} 条")
+        for idx, metric in low_quality:
+            q = testset.items[idx].query if idx < len(testset.items) else f"样本 #{idx}"
+            print(f"    - [{q[:60]}] F={metric['faithfulness']:.2f} AR={metric['answer_relevance']:.2f}")
+    print()
+    logger.info(f"结果已保存: {output}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="AgentKB 检索评估框架",
@@ -218,6 +310,7 @@ def main() -> None:
     p_run.add_argument("--testset", type=str, default=None, help="测试集路径")
     p_run.add_argument("--skip-reranker", action="store_true", help="跳过 reranker（用于对比）")
     p_run.add_argument("--output", type=str, default=None, help="输出路径")
+    p_run.add_argument("--diff-baseline", type=str, default=None, help="基线 JSON，对比后 Recall@5 退化超过 2%% 则 exit 1")
     p_run.set_defaults(func=cmd_run)
 
     # compare
@@ -233,6 +326,13 @@ def main() -> None:
     p_rep.add_argument("--format", type=str, default="md", choices=["md", "json"])
     p_rep.add_argument("--output", type=str, default=None)
     p_rep.set_defaults(func=cmd_report)
+
+    # generation
+    p_gen_eval = sub.add_parser("generation", help="跑生成质量评估（Faithfulness / Answer Relevance）")
+    p_gen_eval.add_argument("--testset", type=str, default=None, help="测试集路径")
+    p_gen_eval.add_argument("--sample-size", type=int, default=10, help="评估样本数（默认 10）")
+    p_gen_eval.add_argument("--output", type=str, default=None)
+    p_gen_eval.set_defaults(func=cmd_generation)
 
     args = parser.parse_args()
     if args.command is None:

@@ -13,7 +13,7 @@ chunking:
   sliding_size: 512
 embedding:
   batch_size: 32
-  device: cpu
+  device: auto
   dimension: 1024
   model_name: BAAI/bge-m3
   normalize: true
@@ -43,6 +43,8 @@ llm:
   base_url: http://localhost:11434
   max_tokens: 4096
   model_name: qwen2.5:7b
+  router_model_name: qwen2.5:3b
+  generator_model_name: qwen2.5:7b
   openai_api_key: ''
   openai_base_url: ''
   provider: ollama
@@ -73,6 +75,9 @@ retrieval:
   dense_weight: 0.6
   final_k: 5
   rrf_k: 60
+mcp:
+  enabled: false
+  servers: []
 web_search:
   enabled: true
   engine: duckduckgo

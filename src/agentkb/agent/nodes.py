@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from langchain_core.messages import (
@@ -13,7 +14,8 @@ from langchain_core.messages import (
 from langchain_core.runnables import RunnableConfig
 from loguru import logger
 
-from agentkb.agent.prompts import SYSTEM_PROMPT
+from agentkb.agent.prompts import SYSTEM_PROMPT, FALLBACK_MESSAGE
+from agentkb.agent.router import IntentRouter, Intent
 from agentkb.agent.state import AgentState
 from agentkb.llm.factory import get_chat_model
 from agentkb.tools.registry import ToolRegistry
@@ -23,24 +25,73 @@ async def agent_node(
     state: AgentState,
     config: RunnableConfig,
 ) -> dict[str, Any]:
-    """Agent 决策节点——调用绑定了工具的 LLM，返回 AI 消息（可能含 tool_calls）。"""
+    """Agent 决策节点——先路由意图，再决定是否绑工具。"""
     llm = get_chat_model(streaming=True)
     registry = ToolRegistry()
     tools = registry.get_langchain_tools()
-    llm_with_tools = llm.bind_tools(tools) if tools else llm
 
     session_id = state.get("session_id", "default")
     system = SystemMessage(content=SYSTEM_PROMPT.format(session_id=session_id))
 
     messages = list(state.get("messages", []))
-    # 确保首条消息为系统提示词（仅当头部缺失时插入）
     if not messages or not isinstance(messages[0], SystemMessage):
         invoke_messages = [system] + messages
     else:
         invoke_messages = messages
 
-    logger.debug(f"agent_node: 用 {len(invoke_messages)} 条消息调用 LLM")
-    response: BaseMessage = await llm_with_tools.ainvoke(invoke_messages)
+    # 同步对话历史到 knowledge_search 模块用于查询重写
+    from agentkb.tools.knowledge_search import update_chat_history
+    update_chat_history(messages)
+
+    # 意图路由——仅首轮决策时使用（后续轮次已有 tool_calls 上下文）
+    is_first_round = not any(
+        isinstance(m, AIMessage) and getattr(m, "tool_calls", None)
+        for m in messages
+    )
+
+    from agentkb.config.settings import Settings
+    cfg = Settings.load()
+
+    if is_first_round and len(messages) <= 1:
+        # 获取用户最新消息
+        user_msg = ""
+        for m in reversed(messages):
+            if hasattr(m, "content") and not isinstance(m, SystemMessage):
+                user_msg = m.content if isinstance(m.content, str) else str(m.content)
+                break
+
+        router_llm = get_chat_model(streaming=False)  # 路由用小模型，不流式
+        router = IntentRouter(llm_client=router_llm)
+        intent = await router.classify(user_msg)
+
+        if intent == Intent.CHAT:
+            logger.info(f"路由: chat（无需工具）")
+            try:
+                response: BaseMessage = await asyncio.wait_for(
+                    llm.ainvoke(invoke_messages),  # 不绑工具
+                    timeout=cfg.llm_request_timeout,
+                )
+            except asyncio.TimeoutError:
+                logger.error("LLM 调用超时")
+                return {"messages": [AIMessage(content=FALLBACK_MESSAGE)]}
+            return {"messages": [response]}
+
+    # 非 chat 意图或后续轮次：正常绑工具调用
+    llm_with_tools = llm.bind_tools(tools) if tools else llm
+
+    logger.debug(f"agent_node: 用 {len(invoke_messages)} 条消息调用 LLM（绑工具）")
+
+    try:
+        response: BaseMessage = await asyncio.wait_for(
+            llm_with_tools.ainvoke(invoke_messages),
+            timeout=cfg.llm_request_timeout,
+        )
+    except asyncio.TimeoutError:
+        logger.error("LLM 调用超时（{}秒）", cfg.llm_request_timeout)
+        return {"messages": [AIMessage(content=FALLBACK_MESSAGE)]}
+    except Exception as exc:
+        logger.error(f"LLM 调用异常: {exc}")
+        return {"messages": [AIMessage(content=FALLBACK_MESSAGE)]}
 
     return {"messages": [response]}
 

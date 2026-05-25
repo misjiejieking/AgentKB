@@ -20,6 +20,7 @@ from loguru import logger
 
 from agentkb.eval.metrics import EvalResult, compute_metrics
 from agentkb.eval.testset import TestSet
+from agentkb.eval.generation_eval import GenerationEval, GenerationEvalResult
 from agentkb.config.settings import Settings
 
 
@@ -221,6 +222,63 @@ class Evaluator:
             current_name=current_name,
             diffs=diffs,
         )
+
+
+    async def evaluate_full(
+        self,
+        testset: TestSet,
+        llm_client=None,
+    ) -> dict:
+        """完整评估：检索指标 + 生成质量。
+
+        先跑检索评估，再对每条 query 用 Agent 生成答案，评估生成质量。
+        """
+        logger.info("开始完整评估（检索 + 生成质量）")
+
+        # 1. 检索评估
+        retrieval_result = self.evaluate(testset)
+
+        # 2. 生成评估
+        from agentkb.knowledge.retriever import get_retriever
+        retriever = get_retriever()
+
+        gen_eval = GenerationEval(llm_client=llm_client)
+        eval_items = []
+
+        for item in testset.items[:10]:  # 默认评估前 10 条，控制成本
+            try:
+                candidates = retriever.retrieve(item.query)
+                contexts = [
+                    c.get("parent_content") or c.get("content", "")[:1024]
+                    for c in (candidates or [])[:5]
+                ]
+
+                # 用评估专用的 judge LLM 生成答案
+                if llm_client:
+                    rag_prompt = f"基于以下上下文回答问题：\n\n上下文：\n{chr(10).join(contexts[:3])}\n\n问题：{item.query}\n\n答案："
+                    resp = await llm_client.ainvoke(rag_prompt)
+                    answer = resp.content if hasattr(resp, "content") else str(resp)
+                else:
+                    answer = "（无 LLM 可用）"
+
+                eval_items.append({
+                    "query": item.query,
+                    "answer": answer,
+                    "contexts": contexts,
+                })
+            except Exception as e:
+                logger.error(f"生成评估项构建失败 [{item.query}]: {e}")
+
+        gen_result = await gen_eval.evaluate_batch(eval_items)
+
+        return {
+            "retrieval": {
+                "recall_at_k": retrieval_result.recall_at_k,
+                "mrr": retrieval_result.mrr,
+                "ndcg_at_k": retrieval_result.ndcg_at_k,
+            },
+            "generation": gen_result.to_dict(),
+        }
 
 
 def _make_diff(name: str, baseline: float, current: float) -> MetricDiff:

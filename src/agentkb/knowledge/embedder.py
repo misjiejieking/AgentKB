@@ -1,4 +1,4 @@
-"""BGE-M3 向量化服务，基于 sentence-transformers。"""
+"""BGE-M3 向量化服务，基于 sentence-transformers，支持 GPU 自动检测 + FP16 推理。"""
 
 from __future__ import annotations
 
@@ -6,6 +6,19 @@ from loguru import logger
 from sentence_transformers import SentenceTransformer
 
 from agentkb.utils.exceptions import EmbeddingError
+
+
+def _auto_device() -> str:
+    """自动检测最优推理设备：CUDA > MPS > CPU。"""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return "cuda"
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return "mps"
+    except ImportError:
+        pass
+    return "cpu"
 
 
 class EmbedderService:
@@ -18,6 +31,8 @@ class EmbedderService:
         normalize: bool = True,
         batch_size: int = 32,
     ) -> None:
+        if device == "auto":
+            device = _auto_device()
         logger.info(f"正在加载向量化模型: {model_name}（设备={device}）")
         try:
             self._model = SentenceTransformer(
@@ -26,6 +41,15 @@ class EmbedderService:
             )
         except Exception as e:
             raise EmbeddingError(f"无法加载向量模型 '{model_name}': {e}") from e
+
+        # CUDA 设备启用 FP16 推理以降低显存占用、提升速度
+        if device == "cuda":
+            try:
+                self._model.half()
+                logger.info("已启用 FP16 半精度推理")
+            except Exception as e:
+                logger.warning(f"FP16 启用失败，回退到 FP32: {e}")
+
         self._normalize = normalize
         self._batch_size = batch_size
         self._dimension = self._model.get_embedding_dimension()

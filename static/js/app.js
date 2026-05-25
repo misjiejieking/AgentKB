@@ -79,6 +79,172 @@ function formatDate(isoStr) {
   }
 }
 
+function formatFileSize(bytes) {
+  if (bytes < 1024) return bytes + "B";
+  if (bytes < 1048576) return (bytes / 1024).toFixed(1) + "KB";
+  return (bytes / 1048576).toFixed(1) + "MB";
+}
+
+function highlightCitations(html, sources) {
+  const sourceMap = {};
+  if (sources) {
+    sources.forEach((s) => {
+      sourceMap[s.filename] = Math.round((s.score || 0) * 100);
+    });
+  }
+  return html.replace(/\[来源:\s*([^\]]+)\]/g, (match, filename) => {
+    const fname = filename.trim();
+    const score = sourceMap[fname];
+    const title = score !== undefined ? `相关度: ${score}%` : fname;
+    return `<span class="citation" title="${escapeHtml(title)}">📄 ${escapeHtml(fname)}</span>`;
+  });
+}
+
+function renderSourceCard(sources) {
+  // 按文件名去重，取最高分
+  const seen = {};
+  sources.forEach((s) => {
+    const fname = s.filename || "unknown";
+    if (!seen[fname] || seen[fname] < s.score) {
+      seen[fname] = s.score;
+    }
+  });
+  const unique = [];
+  for (const [fname, score] of Object.entries(seen)) {
+    unique.push({ filename: fname, score: score });
+  }
+  unique.sort((a, b) => b.score - a.score);
+
+  const items = unique.map((s) => {
+    const pct = Math.round((s.score || 0) * 100);
+    const cls = pct >= 70 ? "high" : pct >= 40 ? "mid" : "low";
+    const icon = pct < 40 ? " ⚠️" : "";
+    return `<div class="source-item ${cls}">
+      <span class="source-icon">📄</span>
+      <span class="source-name">${escapeHtml(s.filename)}</span>
+      <span class="source-score">${pct}%${icon}</span>
+    </div>`;
+  }).join("");
+  return `<div class="source-card">
+    <div class="source-card-title">📎 引用来源</div>
+    ${items}
+  </div>`;
+}
+
+function renderTimingPanel(traceData) {
+  if (!traceData) return "";
+  const rows = [
+    { label: "向量检索", ms: traceData.dense_search_ms },
+    { label: "BM25 检索", ms: traceData.bm25_search_ms },
+    { label: "RRF 融合", ms: traceData.rrf_ms },
+    { label: "重排序", ms: traceData.rerank_ms },
+    { label: "LLM 生成", ms: traceData.llm_gen_ms },
+  ].filter((r) => r.ms !== undefined);
+
+  if (rows.length === 0) return "";
+
+  const total = rows.reduce((s, r) => s + r.ms, 0);
+  const barHtml = rows.map((r) => {
+    const pct = Math.round((r.ms / total) * 100);
+    return `<div class="timing-row">
+      <span class="timing-label">${r.label}</span>
+      <span class="timing-bar-wrap"><span class="timing-bar" style="width:${pct}%"></span></span>
+      <span class="timing-ms">${r.ms}ms</span>
+    </div>`;
+  }).join("");
+
+  return `
+    <details class="timing-panel">
+      <summary>⏱ 本次查询耗时 ${total}ms</summary>
+      ${barHtml}
+    </details>`;
+}
+
+function addFeedbackButtons(messageEl, messageId) {
+  const footer = document.createElement("div");
+  footer.className = "message-feedback";
+  footer.innerHTML = `
+    <button class="feedback-btn up" data-action="up" title="有用">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 22V11M2 13v7a2 2 0 0 0 2 2h12.4a2 2 0 0 0 1.94-1.52l2.1-8.4A2 2 0 0 0 18.5 9.6H14l1-5a2 2 0 0 0-3.46-1.46L7 11"/></svg>
+    </button>
+    <button class="feedback-btn down" data-action="down" title="无用">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 2v11m5-1v-7a2 2 0 0 0-2-2H7.6a2 2 0 0 0-1.94 1.52l-2.1 8.4A2 2 0 0 0 5.5 14.4H10l-1 5a2 2 0 0 0 3.46 1.46L17 13"/></svg>
+    </button>
+  `;
+  messageEl.appendChild(footer);
+
+  footer.querySelectorAll(".feedback-btn").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      const action = btn.dataset.action;
+      footer.querySelectorAll(".feedback-btn").forEach(b => b.disabled = true);
+
+      if (action === "down") {
+        const reason = await promptFeedbackReason();
+        if (!reason) {
+          footer.querySelectorAll(".feedback-btn").forEach(b => b.disabled = false);
+          return;
+        }
+        await submitFeedback(messageId, "down", reason);
+        showToast("感谢反馈，我们会持续改进", "info");
+      } else {
+        await submitFeedback(messageId, "up", "");
+        showToast("感谢反馈！", "success");
+      }
+
+      btn.classList.add("active");
+    });
+  });
+}
+
+function promptFeedbackReason() {
+  return new Promise((resolve) => {
+    const overlay = document.createElement("div");
+    overlay.className = "feedback-overlay";
+    overlay.innerHTML = `
+      <div class="feedback-dialog">
+        <div class="feedback-dialog-title">请选择问题类型</div>
+        <div class="feedback-reasons">
+          <button data-reason="不相关">内容不相关</button>
+          <button data-reason="不准确">信息不准确</button>
+          <button data-reason="不完整">回答不完整</button>
+          <button data-reason="其他">其他</button>
+        </div>
+        <button class="feedback-cancel">取消</button>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+
+    overlay.querySelectorAll(".feedback-reasons button").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        document.body.removeChild(overlay);
+        resolve(btn.dataset.reason);
+      });
+    });
+    overlay.querySelector(".feedback-cancel").addEventListener("click", () => {
+      document.body.removeChild(overlay);
+      resolve(null);
+    });
+  });
+}
+
+async function submitFeedback(messageId, rating, reason) {
+  try {
+    await fetch("/api/feedback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session_id: sessionId,
+        message_id: messageId || "",
+        rating: rating,
+        reason: reason,
+        query: "",
+      }),
+    });
+  } catch (err) {
+    // 静默失败
+  }
+}
+
 // 更新顶部标题
 function setTitle(title) {
   currentSessionTitle.textContent = title || "New Chat";
@@ -234,6 +400,7 @@ async function reconnectStream(sid) {
   let accumulated = assistantEl.textContent.trim() || "";
   let toolLines = [];
   let throttleTimer = null;
+  let finalized = false;
 
   function flushContent() {
     let display = accumulated;
@@ -284,9 +451,30 @@ async function reconnectStream(sid) {
               toolLines = toolLines.map((l) =>
                 l.replace('class="spinner"', 'class="done-icon"').replace("正在调用", "已完成")
               );
+              if (event.name === "search_knowledge_base") {
+                try {
+                  const output = typeof event.output === "string"
+                    ? JSON.parse(event.output) : event.output;
+                  const results = output?.data?.results || [];
+                  if (results.length > 0) {
+                    window._lastSources = results.map((r) => ({
+                      filename: r.filename || "unknown",
+                      score: r.score || 0,
+                    }));
+                  }
+                } catch (e) {}
+              }
               flushContent();
               break;
             case "done":
+              if (window._lastSources && window._lastSources.length > 0) {
+                let html = renderMarkdown(accumulated);
+                html = highlightCitations(html, window._lastSources);
+                assistantEl.innerHTML = html;
+                assistantEl.innerHTML += renderSourceCard(window._lastSources);
+                window._lastSources = null;
+              }
+              finalized = true;
               break;
             case "error":
               accumulated += '\n\n<span style="color:var(--danger)">' + escapeHtml(event.message || "未知错误") + "</span>";
@@ -298,7 +486,9 @@ async function reconnectStream(sid) {
     }
 
     if (throttleTimer) { clearTimeout(throttleTimer); throttleTimer = null; }
-    assistantEl.innerHTML = renderMarkdown(accumulated);
+    if (!finalized) {
+      assistantEl.innerHTML = renderMarkdown(accumulated);
+    }
     finalizeAssistant(assistantEl);
     scrollToBottom();
   } catch (err) {
@@ -360,22 +550,59 @@ async function loadKnowledgeFiles() {
     kbCount.textContent = files.length;
 
     if (files.length === 0) {
-      kbFileList.innerHTML = '<div class="kb-empty">暂无文件</div>';
+      kbFileList.innerHTML = `<div class="kb-empty">
+        <span>暂无文件</span>
+        <button class="kb-upload-hint" onclick="document.getElementById('upload-input').click()">
+          + 上传文件
+        </button>
+      </div>`;
       return;
     }
 
     kbFileList.innerHTML = files
       .map((f) => {
         const name = escapeHtml(f.filename || "unknown");
+        const chunks = f.chunk_count || 0;
+        const size = formatFileSize(f.file_size || 0);
+        const type = (f.file_type || "").toUpperCase();
         return `
-          <div class="kb-file-item" title="${name}">
-            <svg class="file-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-            ${name}
+          <div class="kb-file-item" title="${name} · ${chunks} 分块 · ${size}">
+            <span class="file-type-badge">${type}</span>
+            <span class="file-name-text">${name}</span>
+            <span class="file-meta">${chunks}块</span>
+            <button class="file-delete-btn" data-id="${f.id}" title="删除文件">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+            </button>
           </div>`;
       })
       .join("");
+
+    // 绑定删除事件
+    kbFileList.querySelectorAll(".file-delete-btn").forEach((btn) => {
+      btn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        const fileId = btn.dataset.id;
+        if (confirm("确定要删除该文件及其知识索引吗？")) {
+          await deleteKnowledgeFile(fileId);
+        }
+      });
+    });
   } catch (err) {
     // 静默
+  }
+}
+
+async function deleteKnowledgeFile(fileId) {
+  try {
+    const resp = await fetch(`/api/knowledge/files/${fileId}`, { method: "DELETE" });
+    if (resp.ok) {
+      showToast("文件已删除", "success");
+      loadKnowledgeFiles();
+    } else {
+      showToast("删除失败", "error");
+    }
+  } catch (err) {
+    showToast("删除失败: " + err.message, "error");
   }
 }
 
@@ -435,10 +662,17 @@ async function sendMessage(text) {
 
   addUserMessage(text);
   const assistantEl = addAssistantPlaceholder();
+  // 思考动画
+  assistantEl.innerHTML = '<div class="thinking-indicator"><span></span><span></span><span></span></div>';
+  scrollToBottom();
 
   let accumulated = "";
   let toolLines = [];
   let throttleTimer = null;
+  let finalized = false;
+  window._lastSources = null;
+  window._lastTrace = null;
+  window._lastMsgId = null;
 
   function flushContent() {
     let display = accumulated;
@@ -477,6 +711,10 @@ async function sendMessage(text) {
         try {
           const event = JSON.parse(line.slice(6));
           switch (event.type) {
+            case "message_id":
+              window._lastMsgId = event.message_id;
+              break;
+
             case "token":
               accumulated += event.content;
               if (!throttleTimer) {
@@ -503,10 +741,61 @@ async function sendMessage(text) {
                   "已完成"
                 )
               );
+              // 提取检索来源和统计信息
+              if (event.name === "search_knowledge_base") {
+                try {
+                  const output = typeof event.output === "string"
+                    ? JSON.parse(event.output) : event.output;
+                  const results = output?.data?.results || [];
+                  if (results.length > 0) {
+                    window._lastSources = results.map((r) => ({
+                      filename: r.filename || "unknown",
+                      score: r.score || 0,
+                    }));
+                    const total = output.data.total || results.length;
+                    const topPct = Math.round((results[0].score || 0) * 100);
+                    toolLines.push(`📊 检索到 ${total} 条结果，最佳匹配 ${topPct}%`);
+                  } else {
+                    toolLines.push("📊 知识库中未找到相关内容");
+                  }
+                } catch (e) {}
+              } else if (event.name === "search_web") {
+                try {
+                  const output = typeof event.output === "string"
+                    ? JSON.parse(event.output) : event.output;
+                  const total = output?.data?.total ?? 0;
+                  if (total > 0) {
+                    toolLines.push(`🌐 搜索到 ${total} 条网页结果`);
+                  }
+                } catch (e) {}
+              }
+              // 提取 trace 数据
+              if (event.trace) {
+                window._lastTrace = event.trace;
+              }
               flushContent();
               break;
 
             case "done":
+              if (throttleTimer) {
+                clearTimeout(throttleTimer);
+                throttleTimer = null;
+              }
+              if (window._lastSources && window._lastSources.length > 0) {
+                let html = renderMarkdown(accumulated);
+                html = highlightCitations(html, window._lastSources);
+                assistantEl.innerHTML = html;
+                assistantEl.innerHTML += renderSourceCard(window._lastSources);
+              } else {
+                assistantEl.innerHTML = renderMarkdown(accumulated);
+              }
+              if (window._lastTrace) {
+                assistantEl.innerHTML += renderTimingPanel(window._lastTrace);
+              }
+              addFeedbackButtons(assistantEl, window._lastMsgId);
+              finalizeAssistant(assistantEl);
+              scrollToBottom();
+              finalized = true;
               break;
 
             case "error":
@@ -523,13 +812,16 @@ async function sendMessage(text) {
       }
     }
 
-    if (throttleTimer) {
-      clearTimeout(throttleTimer);
-      throttleTimer = null;
+    if (!finalized) {
+      if (throttleTimer) {
+        clearTimeout(throttleTimer);
+        throttleTimer = null;
+      }
+      assistantEl.innerHTML = renderMarkdown(accumulated);
+      addFeedbackButtons(assistantEl, window._lastMsgId);
+      finalizeAssistant(assistantEl);
+      scrollToBottom();
     }
-    assistantEl.innerHTML = renderMarkdown(accumulated);
-    finalizeAssistant(assistantEl);
-    scrollToBottom();
 
     // 更新侧边栏会话列表（标题可能变化）
     loadSessionList();
@@ -540,6 +832,7 @@ async function sendMessage(text) {
         escapeHtml(err.message) +
         "</span>"
     );
+    addFeedbackButtons(assistantEl, window._lastMsgId);
     finalizeAssistant(assistantEl);
   } finally {
     isStreaming = false;

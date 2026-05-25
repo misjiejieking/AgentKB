@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import aiosqlite
 from pathlib import Path
 from typing import AsyncGenerator, Any
@@ -15,6 +16,7 @@ from loguru import logger
 from agentkb.agent.state import AgentState
 from agentkb.agent.nodes import agent_node, tools_node
 from agentkb.config.settings import Settings
+from agentkb.utils.tracer import start_trace, get_active_trace, finish_trace, trace_span
 
 
 def _should_continue(state: AgentState) -> str:
@@ -74,6 +76,9 @@ class AgentGraph:
         if self._graph is None:
             self._graph = await build_graph()
 
+        # 启动链路追踪
+        trace = start_trace(session_id=session_id, query=user_input)
+
         input_state = {
             "session_id": session_id,
             "messages": [HumanMessage(content=user_input)],
@@ -85,32 +90,51 @@ class AgentGraph:
                 input_state, config, version="v2"
             ):
                 kind = event.get("event", "")
-                print(kind)
                 if kind == "on_chat_model_stream":
                     chunk = event["data"]["chunk"]
                     if hasattr(chunk, "content") and chunk.content:
-                        yield {"type": "token", "content": chunk.content}
+                        yield {"type": "token", "content": chunk.content, "trace_id": trace.trace_id}
 
                 elif kind == "on_tool_start":
                     yield {
                         "type": "tool_start",
                         "name": event["name"],
                         "input": event["data"].get("input", {}),
+                        "trace_id": trace.trace_id,
                     }
 
                 elif kind == "on_tool_end":
                     output = event["data"].get("output", "")
+                    elapsed = _get_event_elapsed(event)
+                    trace.add_event(
+                        f"tool:{event['name']}",
+                        {"output": str(output)[:512]},
+                        elapsed_ms=elapsed,
+                    )
                     yield {
                         "type": "tool_end",
                         "name": event["name"],
                         "output": str(output)[:2048],
+                        "trace_id": trace.trace_id,
+                        "trace": trace.to_dict(),
                     }
 
-            yield {"type": "done", "session_id": session_id}
+            trace.add_event("done", {"session_id": session_id})
+            yield {"type": "done", "session_id": session_id, "trace_id": trace.trace_id, "trace": trace.to_dict()}
 
         except Exception as exc:
             logger.error(f"Agent 流式执行出错: {exc}", exc_info=True)
+            trace.add_event("error", {"message": str(exc)})
             yield {
                 "type": "error",
                 "message": f"处理请求时出错：{exc}",
+                "trace_id": trace.trace_id,
             }
+        finally:
+            finish_trace()
+
+
+def _get_event_elapsed(event: dict) -> float:
+    """从 LangGraph event metadata 中提取耗时。"""
+    meta = event.get("metadata", {}) or {}
+    return float(meta.get("elapsed_ms", 0))
