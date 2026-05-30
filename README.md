@@ -6,6 +6,7 @@
 
 ### 核心能力
 - **智能对话**：自然语言提问，流式 Markdown 回复（SSE + 断点续传）
+- **双 LLM 架构**：Router（轻量意图路由）+ Generator（深度生成），支持 Ollama/DeepSeek 灵活切换
 - **知识库**：上传 .md / .txt / .pdf / .docx / .csv / .json，混合检索（pgvector dense + jieba BM25 + RRF 融合）+ 重排序
 - **多策略分块**：滑动窗口 / 语义分块 / 父子分块，自动根据文档特征选择
 - **联网搜索**：DuckDuckGo（含 DDG Lite 回退）+ 网页全文浏览
@@ -13,6 +14,7 @@
 
 ### V2 新增能力
 - **多 Agent 协作**：Supervisor + 5 个 Specialist Agent（知识检索 / 内容创作 / 任务管理 / 学习助手 / 社媒内容）
+- **LLM 分层路由**：Router LLM（轻量意图分类）+ Generator LLM（深度生成），独立配置不同模型
 - **智能内容创作**：生成文章、短视频脚本、朋友圈文案、简历、报告等（规划→写作→优化三阶段）
 - **任务管理**：自动拆解任务、创建项目计划、进度跟踪
 - **个性化学习**：诊断知识水平、生成学习路径、定制学习材料
@@ -28,7 +30,9 @@
 - Python 3.11+
 - [PostgreSQL](https://www.postgresql.org/) 16+ 已安装并运行
 - pgvector 扩展
-- [DeepSeek API Key](https://platform.deepseek.com/)（也可用 Ollama 本地模型）
+- LLM：任选其一
+  - [Ollama](https://ollama.com/) 本地模型（推荐开发环境：`ollama pull qwen2.5:7b`）
+  - [DeepSeek API Key](https://platform.deepseek.com/)（云端模型）
 
 ### 安装与启动
 
@@ -37,11 +41,8 @@
 psql -U postgres -c "CREATE DATABASE agentkb;"
 psql -U postgres -d agentkb -c "CREATE EXTENSION IF NOT EXISTS vector;"
 
-# 1. 设置 DeepSeek API Key
-# Windows:
-set DEEPSEEK_API_KEY=sk-your-key-here
-# macOS / Linux:
-export DEEPSEEK_API_KEY=sk-your-key-here
+# 1. 配置 LLM —— 编辑 src/agentkb/config/config.yaml
+#    默认使用 Ollama + qwen2.5:7b，切换 DeepSeek 只需改 provider 和 api_key
 
 # 2. 安装依赖
 pip install -r requirements.txt
@@ -63,7 +64,7 @@ python -m agentkb.main
 | 模块 | 技术 |
 |------|------|
 | Agent 编排 | LangGraph + 自研 Multi-Agent Orchestrator |
-| LLM | DeepSeek API（deepseek-chat, 也支持 Ollama 本地模型切换） |
+| LLM | Ollama 本地模型（qwen2.5:7b 默认）/ DeepSeek API（deepseek-chat） |
 | 向量存储 | pgvector (PostgreSQL, HNSW 索引) |
 | 向量模型 | BGE-M3 |
 | Web 框架 | FastAPI + uvicorn |
@@ -184,7 +185,24 @@ observability:
 
 ## 配置
 
-编辑 `src/agentkb/config/config.yaml` 或通过环境变量覆盖（如 `AGENTKB_LLM_MODEL_NAME=deepseek-reasoner` 启用 R1 推理模型）。
+编辑 `src/agentkb/config/config.yaml`：
+
+```yaml
+llm:
+  provider: ollama              # 或 deepseek
+  model_name: qwen2.5:7b        # ollama 本地模型
+  router_model_name: qwen2.5:7b # 路由用小模型
+  generator_model_name: qwen2.5:7b
+  base_url: http://localhost:11434
+```
+
+也可通过环境变量覆盖（如 `AGENTKB_LLM_PROVIDER=deepseek` 切换云端模型）。
+
+## 文档
+
+- **[AGENTS.md](AGENTS.md)** — AI 协作工程标准（中文注释规范、零死代码、禁止过度抽象）
+- **[product.md](product.md)** — 产品需求文档（用户故事、功能规格、交互流程）
+- **[CLAUDE.md](CLAUDE.md)** — Claude Code 项目指令（架构说明、开发命令、关键模式）
 
 ## Roadmap
 
