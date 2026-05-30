@@ -16,51 +16,40 @@ from typing import Any
 
 from loguru import logger
 
-SUPERVISOR_PROMPT = """你是 AgentKB 的总调度员，负责理解用户意图、分解任务、协调专业 Agent 完成工作。
+SUPERVISOR_PROMPT = """你是 AgentKB 的总调度员，负责理解用户意图并将任务指派给合适的 Specialist Agent。
 
 ## 可用 Agent
 {agent_descriptions}
 
-## 对话历史（用于理解上下文和代词指代）
+## 对话历史
 {history}
 
 ## 用户最新消息
 {query}
 
-## 你的职责
-1. **理解上下文**：用户的当前消息可能是对上一轮回答的追问、追问或澄清，结合对话历史理解真实意图
-2. **意图分析**：判断用户属于哪种意图：
-   - chat: 闲聊/打招呼/简短确认（无历史时默认 chat）
-   - knowledge_search: 查询本地知识库中的文档、文件、制度、笔记等内容
-   - web_search: 实时信息、新闻、天气、股价等
-   - content_creation: 写文章/脚本/文案/报告/简历
-   - task_management: 创建/管理待办/项目/任务
-   - learning: 学习指导/个性化学习路径/知识讲解
-   - social_content: 社媒内容（抖音/小红书/公众号）
-   - hybrid: 需要多个 Agent 协作完成
+## 决策规则（严格遵守）
 
-3. **任务分解**：复杂任务拆成 1~5 个子任务
+**规则 1：不需要 Agent 的情况 → intent=chat，在 direct_reply 中直接回复**
+以下情况必须使用 intent="chat"，subtasks=[], direct_reply 写完整回复：
+- 闲聊、打招呼（"你好"、"你是谁"）
+- 询问助手能力（"你会做什么"、"你能干嘛"、"你有什么功能"）
+- 常识性问题（"今天星期几"、"1+1等于几"）
+- 不需要工具就能回答的简单问题
 
-4. **Agent 调度**：为每个子任务指派最合适的 Specialist Agent
-   - 查询知识库内容 → knowledge_agent
-   - 写文章/创作 → content_creator
-   - 管理任务 → task_manager
-   - 学习辅导 → learning_tutor
-   - 社媒文案 → social_writer
+**规则 2：需要 Agent 的情况 → intent 选对应类型，subtasks 填任务列表**
+以下情况必须创建 subtasks，direct_reply=null：
+- 查本地文档 → intent="knowledge_search", assigned_agent="knowledge_agent"
+- 写文章/报告/脚本 → intent="content_creation", assigned_agent="content_creator"
+- 管理任务/项目 → intent="task_management", assigned_agent="task_manager"
+- 学习辅导/教程 → intent="learning", assigned_agent="learning_tutor"
+- 社媒内容（小红书/抖音等） → intent="social_content", assigned_agent="social_writer"
 
-## 输出格式（严格 JSON，不要包含 markdown 标记）
+## 输出格式（严格 JSON，不要包含 markdown 标记，assigned_agent 不要用字符串 "null"）
 {{
-  "intent": "意图类型",
-  "reasoning": "结合对话历史的分析过程",
-  "direct_reply": "如果是 chat，直接回复内容（否则 null）",
-  "subtasks": [
-    {{
-      "id": 1,
-      "description": "子任务描述",
-      "assigned_agent": "agent_name",
-      "dependencies": []  // 依赖的 subtask id 列表
-    }}
-  ]
+  "intent": "chat",
+  "reasoning": "判断依据",
+  "direct_reply": "当 intent=chat 时这里是完整回复内容，其他情况填 null",
+  "subtasks": []
 }}"""
 
 
@@ -115,7 +104,7 @@ class SupervisorAgent:
         llm = self._llm
         if llm is None:
             from agentkb.llm.factory import get_chat_model
-            llm = get_chat_model(streaming=False)
+            llm = get_chat_model(streaming=True)
 
         try:
             response = await llm.ainvoke(prompt)
@@ -153,10 +142,24 @@ class SupervisorAgent:
         """快速关键词路由——命中明确场景直接返回，不需要 LLM。"""
         q = query.strip().lower()
 
-        # 纯闲聊
-        greetings = ["你好", "hi", "hello", "嘿", "早", "晚安", "再见", "谢谢", "谢了"]
-        if any(q == g for g in greetings) or len(q) <= 3:
-            return TaskDecomposition(intent="chat", direct_reply="你好！有什么可以帮助你的吗？")
+        # 纯闲聊和能力询问——不调用 LLM 直接回复
+        chat_kw = [
+            "你好", "hi", "hello", "嘿", "早啊", "晚安", "再见", "谢谢", "谢了", "thx", "thanks",
+            "你会做什么", "你能干嘛", "你有啥用", "你有什么功能", "你是谁", "你是啥",
+            "介绍一下自己", "自我介绍",
+        ]
+        if any(q == kw for kw in chat_kw):
+            return TaskDecomposition(intent="chat", direct_reply=(
+                "你好！我是 AgentKB，一个运行在本地的个人知识助手。\n\n"
+                "我可以帮你：\n"
+                "- 📚 **搜索本地知识库** ——上传文档后，用自然语言查找内容\n"
+                "- 🌐 **联网搜索** ——获取实时信息\n"
+                "- ✍️ **内容创作** ——写文章、脚本、文案、简历、报告\n"
+                "- 📋 **任务管理** ——拆解任务、制定计划\n"
+                "- 🎓 **学习辅导** ——生成个性化学习路径\n"
+                "- 📱 **社媒内容** ——写小红书笔记、抖音脚本、公众号文章\n\n"
+                "你可以先说「帮我写一篇小红书笔记」试试！"
+            ))
 
         # 创作类
         creation_kw = ["写", "生成", "创作", "撰写", "帮我写", "起个标题", "文案", "脚本",

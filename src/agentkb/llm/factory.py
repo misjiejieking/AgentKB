@@ -11,14 +11,12 @@ from agentkb.llm.deepseek_provider import DeepSeekProvider
 from agentkb.utils.exceptions import ConfigError
 
 
-def create_llm(settings: Settings | None = None) -> LLMProvider:
-    """根据配置实例化 LLM Provider。"""
-    cfg = settings or Settings.load()
-
+def _make_provider(cfg: Settings, model_name: str) -> LLMProvider:
+    """根据 provider 类型创建 Provider 实例。"""
     provider = cfg.llm_provider
     if provider == "ollama":
         return OllamaProvider(
-            model_name=cfg.llm_model_name,
+            model_name=model_name,
             base_url=cfg.llm_base_url,
             temperature=cfg.llm_temperature,
             max_tokens=cfg.llm_max_tokens,
@@ -26,7 +24,7 @@ def create_llm(settings: Settings | None = None) -> LLMProvider:
         )
     if provider == "deepseek":
         return DeepSeekProvider(
-            model_name=cfg.llm_model_name,
+            model_name=model_name,
             api_key=cfg.llm_api_key or cfg.openai_api_key,
             base_url=cfg.llm_base_url,
             temperature=cfg.llm_temperature,
@@ -36,10 +34,33 @@ def create_llm(settings: Settings | None = None) -> LLMProvider:
     raise ConfigError(f"未知的 LLM Provider: {provider}")
 
 
+def create_llm(settings: Settings | None = None) -> LLMProvider:
+    """根据配置实例化 LLM Provider（使用 generator_model_name）。"""
+    cfg = settings or Settings.load()
+    model = cfg.llm_generator_model_name or cfg.llm_model_name
+    return _make_provider(cfg, model)
+
+
+def create_router_llm(settings: Settings | None = None) -> LLMProvider:
+    """创建路由专用 LLM（轻量模型，用于意图分类）。"""
+    cfg = settings or Settings.load()
+    model = cfg.llm_router_model_name or cfg.llm_model_name
+    return _make_provider(cfg, model)
+
+
 def get_chat_model(
     streaming: bool = True,
     settings: Settings | None = None,
 ) -> BaseChatModel:
-    """快捷方法：返回可直接 bind_tools 的 ChatModel 实例。"""
+    """返回生成模型 ChatModel（generator_model_name）。"""
     provider = create_llm(settings)
+    return provider.get_chat_model(streaming=streaming)
+
+
+def get_router_chat_model(
+    streaming: bool = False,
+    settings: Settings | None = None,
+) -> BaseChatModel:
+    """返回路由模型 ChatModel（router_model_name，默认不流式）。"""
+    provider = create_router_llm(settings)
     return provider.get_chat_model(streaming=streaming)

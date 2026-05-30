@@ -1,7 +1,20 @@
-"""Multi-Agent LangGraph 图——将 Supervisor→Agent→聚合→Reflection 编码为 StateGraph。"""
+"""Multi-Agent LangGraph 图——将 Supervisor→Agent→聚合→Reflection 编码为 StateGraph。
+
+图结构:
+  START → supervisor_node (意图+分解)
+           ├─ chat/direct_reply → END
+           └─ subtasks → agent_executor_node (loop)
+                          └─ all done → aggregator_node (Reflection+聚合) → END
+
+流式策略:
+  不用 astream_events 捕获节点内 LLM token（因为 Specialist Agent 内部创建
+  的 LLM 实例与 LangGraph callback chain 不连通）。改用 ainvoke 拿到完整
+  final_output 后分块推送模拟流式。
+"""
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import AsyncGenerator, Any
 
@@ -10,7 +23,6 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import MessagesState, StateGraph, END
 from loguru import logger
 
-from agentkb.config.settings import Settings
 from agentkb.observability.tracer import get_tracer
 
 
@@ -18,13 +30,8 @@ from agentkb.observability.tracer import get_tracer
 #  节点定义
 # ══════════════════════════════════════════════════════════════
 
-
 async def _supervisor_node(state: dict) -> dict:
-    """Supervisor 节点——意图分析 + 任务分解 + Agent 路由。
-
-    输入: state["messages"] 最后一条 HumanMessage 为当前 query
-    输出: state["intent"], state["direct_reply"], state["subtasks"]
-    """
+    """Supervisor 节点——意图分析 + 任务分解 + Agent 路由。"""
     messages = state.get("messages", [])
     if not messages:
         return {"intent": "chat", "direct_reply": "你好！有什么可以帮助你的吗？"}
@@ -32,10 +39,9 @@ async def _supervisor_node(state: dict) -> dict:
     last_msg = messages[-1]
     query = last_msg.content if hasattr(last_msg, "content") else str(last_msg)
 
-    # 提取对话历史（当前消息之前的）
     history = [
         f"{'用户' if isinstance(m, HumanMessage) else '助手'}: {m.content[:256]}"
-        for m in messages[:-1]  # 排除当前消息
+        for m in messages[:-1]
         if hasattr(m, "content") and m.content
     ]
 
@@ -49,10 +55,8 @@ async def _supervisor_node(state: dict) -> dict:
     subtasks_dict = []
     for st in decomposition.subtasks:
         subtasks_dict.append({
-            "id": st.id,
-            "description": st.description,
-            "assigned_agent": st.assigned_agent,
-            "dependencies": st.dependencies,
+            "id": st.id, "description": st.description,
+            "assigned_agent": st.assigned_agent, "dependencies": st.dependencies,
         })
 
     result = {
@@ -65,7 +69,6 @@ async def _supervisor_node(state: dict) -> dict:
         "final_output": "",
     }
 
-    # 闲聊直接回复：将回复追加到 messages
     if decomposition.direct_reply:
         result["messages"] = [AIMessage(content=decomposition.direct_reply)]
         result["final_output"] = decomposition.direct_reply
@@ -78,10 +81,7 @@ async def _supervisor_node(state: dict) -> dict:
 
 
 async def _agent_executor_node(state: dict) -> dict:
-    """Agent 执行节点——执行当前 subtask，推结果到 agent_results。
-
-    每次调用执行一个 subtask，执行完 index++。
-    """
+    """Agent 执行节点——执行当前 subtask，推结果到 agent_results。"""
     subtasks = state.get("subtasks", [])
     idx = state.get("current_subtask_index", 0)
 
@@ -92,7 +92,6 @@ async def _agent_executor_node(state: dict) -> dict:
     agent_name = st.get("assigned_agent", "")
     task_desc = st.get("description", "")
 
-    # 获取对话历史作为上下文
     messages = state.get("messages", [])
     history = [
         f"{'用户' if isinstance(m, HumanMessage) else '助手'}: {m.content[:256]}"
@@ -100,13 +99,11 @@ async def _agent_executor_node(state: dict) -> dict:
         if hasattr(m, "content") and m.content
     ]
 
-    # 附加已完成子任务的结果
     completed = {
         str(r.get("id", i)): {"output": r.get("output", "")}
         for i, r in enumerate(state.get("agent_results", []))
     }
 
-    # 路由到 Specialist Agent
     from agentkb.agents.registry import get_agent_registry
     from agentkb.agents.base import AgentResult
 
@@ -118,11 +115,8 @@ async def _agent_executor_node(state: dict) -> dict:
 
     if agent is None:
         logger.warning(f"Agent '{agent_name}' 未注册")
-        result = AgentResult(
-            agent_name=agent_name,
-            success=False,
-            error=f"Agent '{agent_name}' 未注册",
-        )
+        result = AgentResult(agent_name=agent_name, success=False,
+                             error=f"Agent '{agent_name}' 未注册")
     else:
         context = {
             "original_query": task_desc,
@@ -135,14 +129,10 @@ async def _agent_executor_node(state: dict) -> dict:
 
     agent_results = list(state.get("agent_results", []))
     agent_results.append({
-        "id": st.get("id"),
-        "agent_name": agent_name,
-        "success": result.success,
-        "output": result.output,
-        "data": result.data,
-        "error": result.error,
-        "elapsed_ms": result.elapsed_ms,
-        "tokens_used": result.tokens_used,
+        "id": st.get("id"), "agent_name": agent_name,
+        "success": result.success, "output": result.output,
+        "data": result.data, "error": result.error,
+        "elapsed_ms": result.elapsed_ms, "tokens_used": result.tokens_used,
     })
 
     logger.info(
@@ -150,17 +140,11 @@ async def _agent_executor_node(state: dict) -> dict:
         f"success={result.success}, elapsed={result.elapsed_ms:.0f}ms"
     )
 
-    return {
-        "current_subtask_index": idx + 1,
-        "agent_results": agent_results,
-    }
+    return {"current_subtask_index": idx + 1, "agent_results": agent_results}
 
 
 async def _aggregator_node(state: dict) -> dict:
-    """聚合节点——运行 Reflection 自检 + 生成最终回复。
-
-    会添加一条 AIMessage 到 messages 供下次对话使用。
-    """
+    """聚合节点——Reflection 自检 + 生成最终回复。"""
     agent_results = state.get("agent_results", [])
     messages = state.get("messages", [])
 
@@ -174,11 +158,7 @@ async def _aggregator_node(state: dict) -> dict:
     from agentkb.agents.supervisor import SupervisorAgent
     from agentkb.llm.factory import get_chat_model
 
-    llm = get_chat_model(streaming=False)
     reflection = ReflectionModule()
-    supervisor = SupervisorAgent(llm_client=llm)
-
-    # Reflection 自检
     refined = await reflection.critique(
         query=query,
         agent_results=[
@@ -189,14 +169,15 @@ async def _aggregator_node(state: dict) -> dict:
             })()
             for r in agent_results
         ],
-        llm_client=llm,
+        llm_client=None,
     )
 
     if refined.get("needs_revision") and refined.get("revised_output"):
         logger.info("Reflection 触发修订")
         final_output = refined["revised_output"]
     else:
-        # Agent 聚合
+        llm = get_chat_model(streaming=False)
+        supervisor = SupervisorAgent(llm_client=llm)
         final_output = await supervisor.aggregate(agent_results, query)
 
     logger.info(f"Aggregator: final_output length={len(final_output)}")
@@ -212,17 +193,14 @@ async def _aggregator_node(state: dict) -> dict:
 # ══════════════════════════════════════════════════════════════
 
 def _route_after_supervisor(state: dict) -> str:
-    """Supervisor 之后的分支：chat 直接结束，有 subtask 则进入 agent_executor。"""
     if state.get("direct_reply"):
         return END
-    subtasks = state.get("subtasks", [])
-    if subtasks:
+    if state.get("subtasks"):
         return "agent_executor"
     return END
 
 
 def _route_after_executor(state: dict) -> str:
-    """Agent 执行后的分支：还有 subtask 继续，否则进入聚合。"""
     subtasks = state.get("subtasks", [])
     idx = state.get("current_subtask_index", 0)
     if subtasks and idx < len(subtasks):
@@ -234,33 +212,17 @@ def _route_after_executor(state: dict) -> str:
 #  图构建
 # ══════════════════════════════════════════════════════════════
 
-async def build_multi_agent_graph(
-    checkpointer_path: str = "data/checkpoints_multi.db",
-) -> StateGraph:
-    """构建 Multi-Agent LangGraph 状态图。"""
+async def build_multi_agent_graph() -> StateGraph:
     workflow = StateGraph(MessagesState)
-
     workflow.add_node("supervisor", _supervisor_node)
     workflow.add_node("agent_executor", _agent_executor_node)
     workflow.add_node("aggregator", _aggregator_node)
-
     workflow.set_entry_point("supervisor")
-
-    workflow.add_conditional_edges(
-        "supervisor",
-        _route_after_supervisor,
-        {"agent_executor": "agent_executor", END: END},
-    )
-
-    workflow.add_conditional_edges(
-        "agent_executor",
-        _route_after_executor,
-        {"agent_executor": "agent_executor", "aggregator": "aggregator"},
-    )
-
+    workflow.add_conditional_edges("supervisor", _route_after_supervisor,
+                                   {"agent_executor": "agent_executor", END: END})
+    workflow.add_conditional_edges("agent_executor", _route_after_executor,
+                                   {"agent_executor": "agent_executor", "aggregator": "aggregator"})
     workflow.add_edge("aggregator", END)
-
-    from langgraph.checkpoint.memory import MemorySaver
     return workflow.compile(checkpointer=MemorySaver())
 
 
@@ -269,14 +231,13 @@ async def build_multi_agent_graph(
 # ══════════════════════════════════════════════════════════════
 
 class MultiAgentGraph:
-    """封装已编译的 Multi-Agent LangGraph 图，暴露异步流式 API。"""
 
     def __init__(self, graph=None) -> None:
         self._graph = graph
 
     @classmethod
-    async def create(cls, checkpointer_path: str = "data/checkpoints_multi.db") -> MultiAgentGraph:
-        graph = await build_multi_agent_graph(checkpointer_path)
+    async def create(cls) -> MultiAgentGraph:
+        graph = await build_multi_agent_graph()
         return cls(graph)
 
     async def stream(
@@ -286,16 +247,9 @@ class MultiAgentGraph:
         thread_id: str = "default",
         history: list | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
-        """流式执行多 Agent 图。
-
-        astream_events v2 事件类型:
-          - on_chat_model_stream → 推送 token
-          - on_chain_start/end → non-LLM 节点边界（用于进度提示）
-        """
         if self._graph is None:
             self._graph = await build_multi_agent_graph()
 
-        from agentkb.observability.tracer import get_tracer
         tracer = get_tracer()
 
         input_messages = list(history) if history else []
@@ -303,68 +257,44 @@ class MultiAgentGraph:
         input_state = {"session_id": session_id, "messages": input_messages}
         config = {"configurable": {"thread_id": thread_id}}
 
-        # 跟踪是否有 LLM 流式 token 输出过
-        streamed_tokens = False
-
         try:
             with tracer.start_trace(session_id=session_id, query=user_input):
-                async for event in self._graph.astream_events(
-                    input_state, config, version="v2"
-                ):
-                    kind = event.get("event", "")
+                # 推送 supervisor 启动
+                yield {"type": "tool_start", "name": "supervisor",
+                       "input": {"query": user_input}}
 
-                    # ── 节点边界：推送工具状态 ──
-                    if kind == "on_chain_start":
-                        node_name = event.get("name", "")
-                        if node_name in ("supervisor", "agent_executor", "aggregator"):
-                            if node_name == "supervisor":
-                                yield {
-                                    "type": "tool_start",
-                                    "name": "supervisor",
-                                    "input": {"query": user_input},
-                                }
-                            elif node_name == "agent_executor":
-                                yield {
-                                    "type": "tool_start",
-                                    "name": "subtask_executor",
-                                    "input": {"step": "executing"},
-                                }
+                # 同步执行整个图（不依赖 astream_events 捕获内部 token）
+                final_state = await self._graph.ainvoke(input_state, config)
 
-                    if kind == "on_chain_end":
-                        node_name = event.get("name", "")
-                        if node_name == "supervisor":
-                            output = event.get("data", {}).get("output", {})
-                            yield {
-                                "type": "tool_end",
-                                "name": "supervisor",
-                                "output": json.dumps({
-                                    "intent": output.get("intent", ""),
-                                    "subtasks_count": len(output.get("subtasks", [])),
-                                    "direct_reply": output.get("direct_reply", ""),
-                                }, ensure_ascii=False)[:2048],
-                            }
-                        elif node_name == "aggregator":
-                            final = event.get("data", {}).get("output", {})
-                            final_output = final.get("final_output", "")
-                            # 如果 LLM 没有流式输出 token（结构化输出/非流式模式），
-                            # 把最终结果作为 token 补发
-                            if final_output and not streamed_tokens:
-                                yield {
-                                    "type": "token",
-                                    "content": final_output,
-                                }
+                # 推送 supervisor 完成
+                yield {"type": "tool_end", "name": "supervisor",
+                       "output": json.dumps({
+                           "intent": final_state.get("intent", ""),
+                           "subtasks_count": len(final_state.get("subtasks", [])),
+                           "direct_reply": bool(final_state.get("direct_reply")),
+                       }, ensure_ascii=False)[:2048]}
 
-                    # ── LLM token 流 ──
-                    elif kind == "on_chat_model_stream":
-                        chunk = event["data"]["chunk"]
-                        if hasattr(chunk, "content") and chunk.content:
-                            streamed_tokens = True
-                            yield {
-                                "type": "token",
-                                "content": chunk.content,
-                            }
+                # 推送各 Agent 的执行状态
+                for r in final_state.get("agent_results", []):
+                    agent_name = r.get("agent_name", "unknown")
+                    yield {"type": "tool_start", "name": agent_name,
+                           "input": {"agent": agent_name}}
+                    yield {"type": "tool_end", "name": agent_name,
+                           "output": json.dumps({
+                               "success": r.get("success"),
+                               "output_preview": (r.get("output", "") or "")[:200],
+                               "elapsed_ms": r.get("elapsed_ms", 0),
+                           }, ensure_ascii=False)[:2048]}
 
-                # ── 完成 ──
+                # 推送最终回复——分块模拟流式
+                final_output = final_state.get("final_output", "")
+                if final_output:
+                    chunk_size = 3
+                    for i in range(0, len(final_output), chunk_size):
+                        yield {"type": "token",
+                               "content": final_output[i:i + chunk_size]}
+                        await asyncio.sleep(0.015)
+
                 yield {"type": "done", "session_id": session_id}
 
         except Exception as exc:

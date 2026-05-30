@@ -438,7 +438,7 @@ def health_check():
     # LLM
     try:
         from agentkb.llm.factory import get_chat_model
-        get_chat_model(streaming=False)
+        get_chat_model(streaming=True)
         status["components"]["llm"] = "ok"
     except Exception as e:
         status["components"]["llm"] = f"error: {e}"

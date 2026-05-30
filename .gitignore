@@ -21,7 +21,12 @@ env/
 data/uploads/
 data/vectors/
 data/logs/
+data/traces/
+data/eval/reports/
+data/eval/latest_eval.*
 data/*.db
+data/*.db-shm
+data/*.db-wal
 
 # Environment
 .env

@@ -1,0 +1,366 @@
+{
+  "version": 1,
+  "created_at": "2026-05-24T17:15:42.311630+00:00",
+  "items": [
+    {
+      "query": "世界上第一台电子数字计算机ENIAC诞生于哪一年？",
+      "relevant_chunk_ids": [
+        "f3a6ab90-1823-4428-bee2-bbc3a17235e6",
+        "946a315f-ae96-47e4-9082-49a85c6f258f"
+      ],
+      "source_file": "二.docx",
+      "generated_by": "llm"
+    },
+    {
+      "query": "什么事件标志着人工智能作为一门独立学科正式诞生？",
+      "relevant_chunk_ids": [
+        "f3a6ab90-1823-4428-bee2-bbc3a17235e6",
+        "946a315f-ae96-47e4-9082-49a85c6f258f"
+      ],
+      "source_file": "二.docx",
+      "generated_by": "llm"
+    },
+    {
+      "query": "卷积神经网络（CNN）主要用于哪些任务？",
+      "relevant_chunk_ids": [
+        "191d5e1a-50a8-494b-8663-8939eecf12dd",
+        "f8b122c9-2fee-48f4-a4c2-50441e0d0113"
+      ],
+      "source_file": "二.docx",
+      "generated_by": "llm"
+    },
+    {
+      "query": "机器学习主要研究哪些方面的任务？",
+      "relevant_chunk_ids": [
+        "862336b3-e21c-40fd-bc85-c8f92b8c9290",
+        "eb03c10a-8c92-46cb-8e4e-689061c6b2ba"
+      ],
+      "source_file": "二.docx",
+      "generated_by": "llm"
+    },
+    {
+      "query": "人工智能的定义可以从哪些维度进行划分？",
+      "relevant_chunk_ids": [
+        "2e635e88-980b-406a-8ff4-258f6090c3a5",
+        "f3a6ab90-1823-4428-bee2-bbc3a17235e6"
+      ],
+      "source_file": "二.docx",
+      "generated_by": "llm"
+    },
+    {
+      "query": "人工智能的发展历程大致可以分为几个阶段？每个阶段分别有哪些标志性技术突破和应用成果？",
+      "relevant_chunk_ids": [
+        "2e635e88-980b-406a-8ff4-258f6090c3a5",
+        "f3a6ab90-1823-4428-bee2-bbc3a17235e6"
+      ],
+      "source_file": "二.docx",
+      "generated_by": "llm"
+    },
+    {
+      "query": "强人工智能目前处于什么阶段？",
+      "relevant_chunk_ids": [
+        "2488cc74-590b-4cf1-943d-8d633010f251",
+        "a02f3566-7aee-4737-8897-103e165655a0"
+      ],
+      "source_file": "二.docx",
+      "generated_by": "llm"
+    },
+    {
+      "query": "符号主义人工智能的核心思想是什么？",
+      "relevant_chunk_ids": [
+        "2488cc74-590b-4cf1-943d-8d633010f251",
+        "a02f3566-7aee-4737-8897-103e165655a0"
+      ],
+      "source_file": "二.docx",
+      "generated_by": "llm"
+    },
+    {
+      "query": "公司聘用员工时遵循什么原则？",
+      "relevant_chunk_ids": [
+        "b70bcc3a-cd0d-48d8-8c6e-f850e0a018f1",
+        "74549279-d83a-4fdd-bb89-48e635454b40"
+      ],
+      "source_file": "四类文档合集.docx",
+      "generated_by": "llm"
+    },
+    {
+      "query": "新员工未按规定提交材料或材料弄虚作假会有什么后果？",
+      "relevant_chunk_ids": [
+        "b70bcc3a-cd0d-48d8-8c6e-f850e0a018f1",
+        "74549279-d83a-4fdd-bb89-48e635454b40"
+      ],
+      "source_file": "四类文档合集.docx",
+      "generated_by": "llm"
+    },
+    {
+      "query": "计算机视觉和自然语言处理分别有哪些主要应用场景？",
+      "relevant_chunk_ids": [
+        "ea155529-aebc-4ad6-ad99-de68b538407e",
+        "9af7de5a-fb83-467e-8919-c04e14a48fe6"
+      ],
+      "source_file": "二.docx",
+      "generated_by": "llm"
+    },
+    {
+      "query": "培训结束后考核不合格会有哪些后续措施？",
+      "relevant_chunk_ids": [
+        "f5adc052-4f20-461a-b6d1-4e955ada2334",
+        "dcb748cd-b42a-4372-b7b9-4664eabeffe0"
+      ],
+      "source_file": "四类文档合集.docx",
+      "generated_by": "llm"
+    },
+    {
+      "query": "员工每日上下班打卡的时间是什么？",
+      "relevant_chunk_ids": [
+        "dcb748cd-b42a-4372-b7b9-4664eabeffe0",
+        "9776ea93-820a-4940-a6ac-ba003ded1e9c"
+      ],
+      "source_file": "四类文档合集.docx",
+      "generated_by": "llm"
+    },
+    {
+      "query": "请事假的员工每月最多可以请假多少天？",
+      "relevant_chunk_ids": [
+        "dcb748cd-b42a-4372-b7b9-4664eabeffe0",
+        "9776ea93-820a-4940-a6ac-ba003ded1e9c"
+      ],
+      "source_file": "四类文档合集.docx",
+      "generated_by": "llm"
+    },
+    {
+      "query": "文本预处理中常用的分词工具有哪些？",
+      "relevant_chunk_ids": [
+        "95ad108a-1bd8-4eb6-a999-f7a87822625a",
+        "ee9e185f-1468-4dd5-bb43-6113d2c12cf2"
+      ],
+      "source_file": "二.docx",
+      "generated_by": "llm"
+    },
+    {
+      "query": "公司对新员工的培训结束后会进行什么考核？",
+      "relevant_chunk_ids": [
+        "fd85d6cc-2b12-4744-960b-237b3eff1cd9",
+        "2795f159-6682-48d9-8acd-fdf4fd7d5535"
+      ],
+      "source_file": "四类文档合集.docx",
+      "generated_by": "llm"
+    },
+    {
+      "query": "岗位技能培训多久举行一次？每次至少需要多长时间？",
+      "relevant_chunk_ids": [
+        "fd85d6cc-2b12-4744-960b-237b3eff1cd9",
+        "2795f159-6682-48d9-8acd-fdf4fd7d5535"
+      ],
+      "source_file": "四类文档合集.docx",
+      "generated_by": "llm"
+    },
+    {
+      "query": "人工智能系统如何根据围棋棋盘局势推理出最优的落子策略？",
+      "relevant_chunk_ids": [
+        "242a0d2f-d0fa-4365-85b7-81e2296dd400",
+        "3855c01e-2888-40b9-ad1c-1a3f3599e4e1"
+      ],
+      "source_file": "二.docx",
+      "generated_by": "llm"
+    },
+    {
+      "query": "强人工智能与弱人工智能在哪些方面存在差异？",
+      "relevant_chunk_ids": [
+        "242a0d2f-d0fa-4365-85b7-81e2296dd400",
+        "3855c01e-2888-40b9-ad1c-1a3f3599e4e1"
+      ],
+      "source_file": "二.docx",
+      "generated_by": "llm"
+    },
+    {
+      "query": "数据在机器学习中的作用是什么？",
+      "relevant_chunk_ids": [
+        "f98e9be8-1a2f-4767-8bf9-e091c44c64a2",
+        "7c273125-d4ee-4cf3-8523-9d7ae4b2d835"
+      ],
+      "source_file": "二.docx",
+      "generated_by": "llm"
+    },
+    {
+      "query": "员工如果对公司的处罚决定有异议，应该在多长时间内提出申诉？",
+      "relevant_chunk_ids": [
+        "dd7f352b-ad97-463a-8959-829b35a19c78",
+        "cad29c62-eb87-43d6-9b26-7dc3f43777dd"
+      ],
+      "source_file": "四类文档合集.docx",
+      "generated_by": "llm"
+    },
+    {
+      "query": "图像预处理的主要步骤有哪些？",
+      "relevant_chunk_ids": [
+        "ee9e185f-1468-4dd5-bb43-6113d2c12cf2",
+        "57e54f3a-58f8-4b54-ade0-2b14ddf3b6c6"
+      ],
+      "source_file": "二.docx",
+      "generated_by": "llm"
+    },
+    {
+      "query": "新员工入职需要提交哪些相关材料？",
+      "relevant_chunk_ids": [
+        "74549279-d83a-4fdd-bb89-48e635454b40",
+        "f5adc052-4f20-461a-b6d1-4e955ada2334"
+      ],
+      "source_file": "四类文档合集.docx",
+      "generated_by": "llm"
+    },
+    {
+      "query": "主动离职需要提前多久提交书面离职申请？",
+      "relevant_chunk_ids": [
+        "d9a10d32-ad12-4c91-bfd1-ae7474af54a1",
+        "20b793be-d0cf-4a46-8ab4-bbb374311bc2"
+      ],
+      "source_file": "四类文档合集.docx",
+      "generated_by": "llm"
+    },
+    {
+      "query": "旷工多少天会被视为自动离职？",
+      "relevant_chunk_ids": [
+        "d9a10d32-ad12-4c91-bfd1-ae7474af54a1",
+        "20b793be-d0cf-4a46-8ab4-bbb374311bc2"
+      ],
+      "source_file": "四类文档合集.docx",
+      "generated_by": "llm"
+    },
+    {
+      "query": "员工在工作期间有哪些行为是被禁止的？",
+      "relevant_chunk_ids": [
+        "7d58fd56-0fea-4f81-9ad8-e3c9f690dfe1",
+        "a146e259-3a25-47e0-b27c-fe549d1eb67f"
+      ],
+      "source_file": "四类文档合集.docx",
+      "generated_by": "llm"
+    },
+    {
+      "query": "什么是违反公司规定的行为可能面临的处罚？",
+      "relevant_chunk_ids": [
+        "a146e259-3a25-47e0-b27c-fe549d1eb67f",
+        "631ef38a-b126-4ca0-9918-c3d909988453"
+      ],
+      "source_file": "四类文档合集.docx",
+      "generated_by": "llm"
+    },
+    {
+      "query": "工资发放有哪些具体的规定？",
+      "relevant_chunk_ids": [
+        "a146e259-3a25-47e0-b27c-fe549d1eb67f",
+        "631ef38a-b126-4ca0-9918-c3d909988453"
+      ],
+      "source_file": "四类文档合集.docx",
+      "generated_by": "llm"
+    },
+    {
+      "query": "员工请病假8-30天可以拿多少工资？",
+      "relevant_chunk_ids": [
+        "9776ea93-820a-4940-a6ac-ba003ded1e9c",
+        "315fd56d-5767-44bd-aef6-37355c159728"
+      ],
+      "source_file": "四类文档合集.docx",
+      "generated_by": "llm"
+    },
+    {
+      "query": "员工直系亲属去世可以享受多少天的丧假？",
+      "relevant_chunk_ids": [
+        "315fd56d-5767-44bd-aef6-37355c159728",
+        "7d58fd56-0fea-4f81-9ad8-e3c9f690dfe1"
+      ],
+      "source_file": "四类文档合集.docx",
+      "generated_by": "llm"
+    },
+    {
+      "query": "请假3天以上需要经过哪些审批流程？",
+      "relevant_chunk_ids": [
+        "315fd56d-5767-44bd-aef6-37355c159728",
+        "7d58fd56-0fea-4f81-9ad8-e3c9f690dfe1"
+      ],
+      "source_file": "四类文档合集.docx",
+      "generated_by": "llm"
+    },
+    {
+      "query": "公司对员工提出合理化建议给予的奖励金额范围是多少？",
+      "relevant_chunk_ids": [
+        "2fbd04cf-a94d-4952-8c75-a7f9bd7d603a",
+        "dd7f352b-ad97-463a-8959-829b35a19c78"
+      ],
+      "source_file": "四类文档合集.docx",
+      "generated_by": "llm"
+    },
+    {
+      "query": "员工因保护公司财产、商业秘密避免重大损失可以获得哪些奖励？",
+      "relevant_chunk_ids": [
+        "2fbd04cf-a94d-4952-8c75-a7f9bd7d603a",
+        "dd7f352b-ad97-463a-8959-829b35a19c78"
+      ],
+      "source_file": "四类文档合集.docx",
+      "generated_by": "llm"
+    },
+    {
+      "query": "什么是人工智能的核心？",
+      "relevant_chunk_ids": [
+        "e5ce6c6c-5bce-47b2-ac5c-457fa8dab762",
+        "2e635e88-980b-406a-8ff4-258f6090c3a5"
+      ],
+      "source_file": "二.docx",
+      "generated_by": "llm"
+    },
+    {
+      "query": "机器学习中的分类问题可以使用哪些常见的模型解决？",
+      "relevant_chunk_ids": [
+        "7c273125-d4ee-4cf3-8523-9d7ae4b2d835",
+        "ee5f6943-f947-4c77-b2d9-a2bc7ba3eb86"
+      ],
+      "source_file": "二.docx",
+      "generated_by": "llm"
+    },
+    {
+      "query": "卷积神经网络主要用于处理什么类型的任务？",
+      "relevant_chunk_ids": [
+        "7c273125-d4ee-4cf3-8523-9d7ae4b2d835",
+        "ee5f6943-f947-4c77-b2d9-a2bc7ba3eb86"
+      ],
+      "source_file": "二.docx",
+      "generated_by": "llm"
+    },
+    {
+      "query": "员工离职后需要办理哪些手续才能完成工作交接？",
+      "relevant_chunk_ids": [
+        "20b793be-d0cf-4a46-8ab4-bbb374311bc2",
+        "2fbd04cf-a94d-4952-8c75-a7f9bd7d603a"
+      ],
+      "source_file": "四类文档合集.docx",
+      "generated_by": "llm"
+    },
+    {
+      "query": "哪些员工在离职后需要遵守竞业限制规定？",
+      "relevant_chunk_ids": [
+        "20b793be-d0cf-4a46-8ab4-bbb374311bc2",
+        "2fbd04cf-a94d-4952-8c75-a7f9bd7d603a"
+      ],
+      "source_file": "四类文档合集.docx",
+      "generated_by": "llm"
+    },
+    {
+      "query": "人工智能系统中的自主性具体表现在哪些方面？",
+      "relevant_chunk_ids": [
+        "84d45cd4-0a9a-4d5f-a8e3-184ca21c3107",
+        "242a0d2f-d0fa-4365-85b7-81e2296dd400"
+      ],
+      "source_file": "二.docx",
+      "generated_by": "llm"
+    },
+    {
+      "query": "深度学习与传统机器学习的主要区别是什么？",
+      "relevant_chunk_ids": [
+        "ee5f6943-f947-4c77-b2d9-a2bc7ba3eb86",
+        "191d5e1a-50a8-494b-8663-8939eecf12dd"
+      ],
+      "source_file": "二.docx",
+      "generated_by": "llm"
+    }
+  ]
+}

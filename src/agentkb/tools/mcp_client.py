@@ -94,7 +94,7 @@ class MCPClientBridge:
             self._process = None
 
     async def _send_request(self, method: str, params: dict | None = None) -> dict:
-        """发送 JSON-RPC 请求并返回结果。"""
+        """发送 JSON-RPC 请求并返回结果——阻塞 I/O 通过线程池执行。"""
         if not self._process or self._process.poll() is not None:
             raise RuntimeError(f"MCP Server '{self._name}' 未运行")
 
@@ -105,18 +105,23 @@ class MCPClientBridge:
             "method": method,
             "params": params or {},
         }
-        # stdio 写入
-        self._process.stdin.write(json.dumps(request) + "\n")
-        self._process.stdin.flush()
 
-        # 读取响应
-        line = self._process.stdout.readline()
-        if not line:
-            raise RuntimeError(f"MCP Server '{self._name}' 无响应")
-        response = json.loads(line)
-        if "error" in response:
-            raise RuntimeError(f"MCP 错误: {response['error']}")
-        return response.get("result", {})
+        # 同步 I/O 丢到线程池，避免阻塞事件循环
+        import asyncio as _asyncio
+        loop = _asyncio.get_running_loop()
+
+        def _sync_io() -> dict:
+            self._process.stdin.write(json.dumps(request) + "\n")
+            self._process.stdin.flush()
+            line = self._process.stdout.readline()
+            if not line:
+                raise RuntimeError(f"MCP Server '{self._name}' 无响应")
+            response = json.loads(line)
+            if "error" in response:
+                raise RuntimeError(f"MCP 错误: {response['error']}")
+            return response.get("result", {})
+
+        return await loop.run_in_executor(None, _sync_io)
 
     async def list_tools(self) -> list[dict]:
         """获取 MCP Server 提供的工具列表。"""

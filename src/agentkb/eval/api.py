@@ -282,7 +282,7 @@ async def _run_eval_job(job_id: str, params: EvalSubmitRequest) -> None:
             try:
                 from agentkb.eval.generation_eval import GenerationEval
                 from agentkb.llm.factory import get_chat_model
-                llm = get_chat_model(streaming=False)
+                llm = get_chat_model(streaming=True)
                 gen_eval = GenerationEval(llm_client=llm)
                 eval_items = []
                 for item in testset.items[:min(10, total)]:

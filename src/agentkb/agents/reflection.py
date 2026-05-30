@@ -86,7 +86,7 @@ class ReflectionModule:
         if len(combined) < 100 and len(outputs) == 1:
             return {"needs_revision": False}
 
-        # LLM 审查
+        # LLM 审查——用非流式，Reflection 返回 JSON 不应推 token 到前端
         llm = llm_client
         if llm is None:
             from agentkb.llm.factory import get_chat_model

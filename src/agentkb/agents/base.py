@@ -94,7 +94,7 @@ class SpecialistAgent(ABC):
     def llm(self):
         """获取此 Agent 的 LLM 实例。"""
         from agentkb.llm.factory import get_chat_model
-        return get_chat_model(streaming=False)
+        return get_chat_model(streaming=True)
 
     def log(self, message: str) -> None:
         logger.info(f"[{self.name}] {message}")

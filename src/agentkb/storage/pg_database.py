@@ -179,6 +179,13 @@ class Database:
         with self._connect() as conn:
             with conn.cursor() as cur:
                 cur.execute(_DDL)
+                # 兼容旧版 migratory：GENERATED ALWAYS → 普通列
+                try:
+                    cur.execute(
+                        "ALTER TABLE knowledge_chunks ALTER COLUMN fts_vector DROP EXPRESSION"
+                    )
+                except Exception:
+                    pass
         # 索引单独执行（HNSW 可能较慢）
         with self._connect() as conn:
             with conn.cursor() as cur:

@@ -12,17 +12,19 @@ from agentkb.tools.base import BaseTool, ToolResult
 from agentkb.knowledge.retriever import get_retriever
 from agentkb.knowledge.cache import get_cache
 
-# 模块级对话历史缓存——agent_node 更新，knowledge_search 消费
-_chat_history: list[str] = []
+# 模块级对话历史缓存——按 session_id 隔离，agent_node 更新，knowledge_search 消费
+_chat_histories: dict[str, list[str]] = {}
+_current_session_id: str = "default"
 
 
-def update_chat_history(messages: list) -> None:
-    """更新当前会话的对话历史（由 agent_node 调用）。"""
-    global _chat_history
-    _chat_history = [
+def update_chat_history(messages: list, session_id: str = "default") -> None:
+    """更新指定会话的对话历史（由 agent_node 调用）。"""
+    global _chat_histories, _current_session_id
+    _chat_histories[session_id] = [
         (m.content if hasattr(m, "content") else str(m))[:256]
         for m in messages[-6:]
     ]
+    _current_session_id = session_id
 
 
 class KnowledgeSearchInput(BaseModel):
@@ -61,8 +63,10 @@ class KnowledgeSearchTool(BaseTool):
         # 0. 查询重写——多轮对话场景指代消解 + 关键词提取
         search_query = query
         try:
-            llm = get_chat_model(streaming=False)
-            rewritten = await rewrite_query(query, _chat_history, llm)
+            llm = get_chat_model(streaming=True)
+            rewritten = await rewrite_query(
+                query, _chat_histories.get(_current_session_id, []), llm
+            )
             search_query = rewritten.get("rewritten", query)
             logger.debug(f"查询重写: {query[:60]} → {search_query[:60]}")
         except Exception as e:
@@ -123,14 +127,17 @@ class KnowledgeSearchTool(BaseTool):
             results.append({
                 "content": content,
                 "filename": filename,
-                "score": r.get("rerank_score", 0),
+                "score": r.get("rerank_score") or r.get("rrf_score", 0),
             })
 
         # 4. 上下文截断：限制总 token 数，优先保留高分结果
+        # deep copy 避免截断后的残缺内容写入语义缓存
+        import copy
+        results_for_cache = copy.deepcopy(results)
         results = self._truncate_context(results, max_tokens=cfg.llm_max_tokens)
 
-        # 写入语义缓存
-        cache.set(cache_embedding, results)
+        # 写入语义缓存（用未截断的完整内容）
+        cache.set(cache_embedding, results_for_cache[:cfg.retrieval_final_k])
 
         # 检查降级标记
         degraded = any(r.get("degraded") for r in ranked)

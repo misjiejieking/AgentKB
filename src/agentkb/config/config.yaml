@@ -40,13 +40,13 @@ langgraph:
   checkpointer_db: data/checkpoints.db
   max_recursion_limit: 10
 llm:
-  provider: deepseek
-  model_name: deepseek-chat
-  router_model_name: deepseek-chat
-  generator_model_name: deepseek-chat
-  base_url: https://api.deepseek.com
-  api_key: "sk-5bd35832a9ea408a9791cb5ea81d70f0"
-  max_tokens: 8192
+  provider: ollama
+  model_name: qwen2.5:7b
+  router_model_name: qwen2.5:7b
+  generator_model_name: qwen2.5:7b
+  base_url: http://localhost:11434
+  api_key: ""
+  max_tokens: 4096
   openai_api_key: ''
   openai_base_url: ''
   request_timeout: 120

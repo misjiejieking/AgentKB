@@ -254,7 +254,7 @@ async def cmd_generation(args) -> None:
 
     get_db()
     get_embedder()
-    llm = get_chat_model(streaming=False)
+    llm = get_chat_model(streaming=True)
 
     evaluator = Evaluator()
     result = await evaluator.evaluate_full(testset, llm_client=llm)

@@ -17,7 +17,7 @@ from loguru import logger
 from agentkb.agent.prompts import SYSTEM_PROMPT, FALLBACK_MESSAGE
 from agentkb.agent.router import IntentRouter, Intent
 from agentkb.agent.state import AgentState
-from agentkb.llm.factory import get_chat_model
+from agentkb.llm.factory import get_chat_model, get_router_chat_model
 from agentkb.tools.registry import ToolRegistry
 
 
@@ -41,7 +41,7 @@ async def agent_node(
 
     # 同步对话历史到 knowledge_search 模块用于查询重写
     from agentkb.tools.knowledge_search import update_chat_history
-    update_chat_history(messages)
+    update_chat_history(messages, session_id=session_id)
 
     # 意图路由——仅首轮决策时使用（后续轮次已有 tool_calls 上下文）
     is_first_round = not any(
@@ -60,7 +60,7 @@ async def agent_node(
                 user_msg = m.content if isinstance(m.content, str) else str(m.content)
                 break
 
-        router_llm = get_chat_model(streaming=False)  # 路由用小模型，不流式
+        router_llm = get_router_chat_model(streaming=False)  # 路由用小模型，不流式
         router = IntentRouter(llm_client=router_llm)
         intent = await router.classify(user_msg)
 
