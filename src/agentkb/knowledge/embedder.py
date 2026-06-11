@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+import os
+
 from loguru import logger
+
+# 本地模型可能只有 PyTorch 权重；禁止 Transformers 后台联网创建转换 PR。
+os.environ.setdefault("DISABLE_SAFETENSORS_CONVERSION", "1")
+
 from sentence_transformers import SentenceTransformer
 
 from agentkb.utils.exceptions import EmbeddingError

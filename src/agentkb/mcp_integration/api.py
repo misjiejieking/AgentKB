@@ -8,8 +8,8 @@ import uuid
 from fastapi import APIRouter, HTTPException
 from psycopg2 import IntegrityError  # type: ignore[import-untyped]
 
-from agentkb.mcp.manager import get_mcp_manager
-from agentkb.mcp.models import MCPServerCreate, MCPToolStatusRequest
+from agentkb.mcp_integration.manager import get_mcp_manager
+from agentkb.mcp_integration.models import MCPServerCreate, MCPToolStatusRequest
 from agentkb.storage.pg_database import get_db
 
 router = APIRouter(prefix="/mcp", tags=["mcp"])

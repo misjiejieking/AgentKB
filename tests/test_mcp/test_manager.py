@@ -6,8 +6,12 @@ from typing import Any
 
 import pytest
 
-from agentkb.mcp.manager import MCPManager, _local_tool_name, _resolve_templates
-from agentkb.mcp.models import MCPServerCreate, requires_confirmation
+from agentkb.mcp_integration.manager import (
+    MCPManager,
+    _local_tool_name,
+    _resolve_templates,
+)
+from agentkb.mcp_integration.models import MCPServerCreate, requires_confirmation
 from agentkb.tools.registry import ToolRegistry
 
 

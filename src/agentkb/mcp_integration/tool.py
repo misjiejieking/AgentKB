@@ -9,7 +9,7 @@ from langchain_core.tools import StructuredTool
 from agentkb.tools.base import BaseTool, ToolResult
 
 if TYPE_CHECKING:
-    from agentkb.mcp.manager import MCPManager
+    from agentkb.mcp_integration.manager import MCPManager
 
 
 class MCPTool(BaseTool):

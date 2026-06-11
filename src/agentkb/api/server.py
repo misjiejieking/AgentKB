@@ -20,7 +20,7 @@ def create_app(graph, multi_agent_graph=None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         from agentkb.knowledge.graph import resume_knowledge_graph_indexing
-        from agentkb.mcp.manager import get_mcp_manager
+        from agentkb.mcp_integration.manager import get_mcp_manager
         from agentkb.storage.pg_database import get_db
 
         await resume_knowledge_graph_indexing()
@@ -55,7 +55,7 @@ def create_app(graph, multi_agent_graph=None) -> FastAPI:
 
     app.include_router(agents_router, prefix="/api")
 
-    from agentkb.mcp.api import router as mcp_router
+    from agentkb.mcp_integration.api import router as mcp_router
 
     app.include_router(mcp_router, prefix="/api")
 

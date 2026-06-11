@@ -16,8 +16,8 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamable_http_client
 
-from agentkb.mcp.models import requires_confirmation
-from agentkb.mcp.tool import MCPTool
+from agentkb.mcp_integration.models import requires_confirmation
+from agentkb.mcp_integration.tool import MCPTool
 from agentkb.storage.pg_database import Database, get_db
 from agentkb.tools.base import ToolResult
 from agentkb.tools.registry import ToolRegistry

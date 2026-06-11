@@ -83,6 +83,8 @@ class LocalReranker(RerankerService):
     """本地 BGE-Reranker CrossEncoder（需 sentence-transformers）。"""
 
     def __init__(self, model_name: str = "BAAI/bge-reranker-v2-m3", device: str = "cpu") -> None:
+        # local_files_only 不会阻止 Transformers 后台尝试 Safetensors 转换。
+        os.environ.setdefault("DISABLE_SAFETENSORS_CONVERSION", "1")
         from sentence_transformers import CrossEncoder
 
         logger.info(f"正在加载 Reranker 模型: {model_name}（设备={device}）")
