@@ -72,7 +72,9 @@ class HybridRetriever:
                 item["degrade_reason"] = degrade_reason
 
         # 4. 按分数排序，返回 top candidate_k
-        sort_key = lambda x: x.get("rrf_score", x.get("score", 0))
+        def sort_key(item: dict) -> float:
+            return float(item.get("rrf_score", item.get("score", 0)))
+
         merged.sort(key=sort_key, reverse=True)
         return merged[:cfg.retrieval_candidate_k]
 

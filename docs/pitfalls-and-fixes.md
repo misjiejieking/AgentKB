@@ -22,16 +22,19 @@ workflow = StateGraph(MessagesState)
 
 ---
 
-## 2. AsyncSqliteSaver 序列化丢失 tool_calls
+## 2. Checkpointer 必须完整保留消息类型
 
-**现象**：`AsyncSqliteSaver` 存盘后，AIMessage 的 `tool_calls` 字段丢失（变为空列表），导致 ToolMessage 前面没有对应的 tool_calls，DeepSeek API 报 400。
+**现象**：Checkpointer 往返序列化后，如果 `AIMessage.tool_calls` 丢失，后续
+`ToolMessage` 会失去对应调用，OpenAI 兼容接口将拒绝请求。
 
-**根因**：`AsyncSqliteSaver` 用 `orjson` 序列化 AIMessage 对象，嵌套的 `tool_calls` 结构在 round-trip 中丢失。
+**根因**：仅保存普通 JSON 文本无法完整恢复 LangChain 消息对象及其嵌套类型。
 
-**修复**：改用 `MemorySaver`，消息对象在内存中原样传递，无需序列化。
+**修复**：使用 LangGraph SerializerProtocol 对完整 Checkpoint 做类型化序列化，
+并持久化到 PostgreSQL。服务重启后可恢复状态，消息类型和 `tool_calls` 结构也不会丢失。
 ```python
-from langgraph.checkpoint.memory import MemorySaver
-checkpointer = MemorySaver()
+from agentkb.storage.checkpointer import PostgresCheckpointSaver
+
+checkpointer = PostgresCheckpointSaver(database)
 ```
 
 ---
@@ -42,9 +45,9 @@ checkpointer = MemorySaver()
 
 **根因**：Ollama 的 tool_calls 缺少 `id` 字段，DeepSeek 要求 `id` + `type` + `function.arguments` 必须是 JSON 字符串。
 
-**修复**：`thread_id` 加模型名后缀，不同模型自动隔离 checkpointer 状态。
+**修复**：`thread_id` 同时加入 Provider、模型和图类型，不同运行协议的状态相互隔离。
 ```python
-thread_id = f"{session_id}:{model_name}"
+thread_id = f"{session_id}:{provider}:{model_name}:{graph_name}"
 ```
 
 ---
@@ -96,7 +99,7 @@ re.sub(r"(?<=[一-鿿]) (?=[一-鿿])", "", text)
 
 **修复**：
 1. LLM 运行与 SSE 连接解耦——后台任务独立执行，每 N token 写 DB
-2. SessionStream 事件缓存 + SSE `id:` 字段 + GET 断点续传端点
+2. Run/Event 持久化事件 + SSE `id:` 字段 + GET 断点续传端点
 3. 前端加载历史时自动重连未完成的流
 
 ---

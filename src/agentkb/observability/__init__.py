@@ -10,9 +10,9 @@ from agentkb.observability.exporters import (
     TraceExporter,
     ConsoleExporter,
     FileExporter,
+    PostgreSQLExporter,
     LangFuseExporter,
     LangSmithExporter,
-    PrometheusExporter,
     get_exporters,
 )
 from agentkb.observability.metrics import (
@@ -29,9 +29,9 @@ __all__ = [
     "TraceExporter",
     "ConsoleExporter",
     "FileExporter",
+    "PostgreSQLExporter",
     "LangFuseExporter",
     "LangSmithExporter",
-    "PrometheusExporter",
     "get_exporters",
     "MetricsCollector",
     "get_metrics",

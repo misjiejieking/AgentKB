@@ -6,10 +6,15 @@
 // ══════════════════════════════════════════════════════════════
 
 let sessionId = localStorage.getItem("agentkb_session_id") || "";
-let isStreaming = false;
 let sidebarVisible = true;
-let lastEventId = 0;  // SSE 断点续传：当前会话最后收到的 event id
 let agentMode = localStorage.getItem("agentkb_agent_mode") || "auto";  // "auto" | "simple"
+const generatingSessions = new Set();
+const streamControllers = new Map();
+const sessionEventIds = new Map();
+let knowledgeRefreshTimer = null;
+let pendingAttachments = [];
+let mediaRecorder = null;
+let recordedChunks = [];
 
 // ══════════════════════════════════════════════════════════════
 //  DOM 引用
@@ -22,17 +27,79 @@ const chatContainer = $("#chat");
 const msgInput = $("#msg-input");
 const sendBtn = $("#send-btn");
 const uploadInput = $("#upload-input");
+const chatImageInput = $("#chat-image-input");
+const attachmentTray = $("#attachment-tray");
+const recordButton = $("#btn-record");
 const sessionList = $("#session-list");
 const kbFileList = $("#kb-file-list");
 const kbCount = $("#kb-count");
 const currentSessionTitle = $("#current-session-title");
 const welcomeScreen = $("#welcome-screen");
 const sidebar = $("#sidebar");
+const sidebarToggle = $("#btn-toggle-sidebar");
+const sidebarBackdrop = $("#sidebar-backdrop");
 const toastContainer = $("#toast-container");
+const graphOverlay = $("#graph-overlay");
+const graphStats = $("#graph-stats");
+const graphResults = $("#graph-results");
+const graphQuery = $("#graph-query");
+const evalOverlay = $("#eval-overlay");
+const evalJobs = $("#eval-jobs");
+const evalBaselines = $("#eval-baselines");
+const evalGates = $("#eval-gates");
+const agentsOverlay = $("#agents-overlay");
+const agentDraftForm = $("#agent-draft-form");
+const agentConfirmForm = $("#agent-confirm-form");
+const customAgentList = $("#custom-agent-list");
+const agentTools = $("#agent-tools");
+const mcpOverlay = $("#mcp-overlay");
+const mcpServerForm = $("#mcp-server-form");
+const mcpServerList = $("#mcp-server-list");
+let availableAgentTools = [];
 
 // ══════════════════════════════════════════════════════════════
 //  工具函数
 // ══════════════════════════════════════════════════════════════
+
+function updateComposerState() {
+  sendBtn.disabled = generatingSessions.has(sessionId);
+}
+
+function renderAttachmentTray() {
+  attachmentTray.hidden = pendingAttachments.length === 0;
+  attachmentTray.innerHTML = pendingAttachments.map((attachment) => `
+    <div class="attachment-chip">
+      <img src="${attachment.url}" alt="">
+      <span>${escapeHtml(attachment.name)}</span>
+      <button type="button" data-remove-attachment="${escapeHtml(attachment.id)}" aria-label="移除图片">×</button>
+    </div>
+  `).join("");
+}
+
+function disconnectSessionStream(sid) {
+  const controller = streamControllers.get(sid);
+  if (controller) {
+    controller.abort();
+    streamControllers.delete(sid);
+  }
+}
+
+function beginSessionStream(sid) {
+  disconnectSessionStream(sid);
+  const controller = new AbortController();
+  streamControllers.set(sid, controller);
+  generatingSessions.add(sid);
+  updateComposerState();
+  return controller;
+}
+
+function finishSessionStream(sid, controller) {
+  if (streamControllers.get(sid) === controller) {
+    streamControllers.delete(sid);
+  }
+  generatingSessions.delete(sid);
+  updateComposerState();
+}
 
 function escapeHtml(text) {
   const div = document.createElement("div");
@@ -45,6 +112,58 @@ function renderMarkdown(text) {
     return marked.parse(text);
   }
   return escapeHtml(text).replace(/\n/g, "<br>");
+}
+
+function renderApprovalCard(event) {
+  const argumentsText = JSON.stringify(event.arguments || {}, null, 2);
+  return `
+    <div class="tool-approval" data-approval-id="${escapeHtml(event.approval_id)}">
+      <div class="tool-approval__title">需要人工确认</div>
+      <div class="tool-approval__message">${escapeHtml(event.message || "该工具需要确认")}</div>
+      <pre>${escapeHtml(argumentsText)}</pre>
+      <div class="tool-approval__actions">
+        <button type="button" data-decision="reject">拒绝</button>
+        <button type="button" class="primary" data-decision="approve">批准执行</button>
+      </div>
+      <div class="tool-approval__status"></div>
+    </div>
+  `;
+}
+
+function bindApprovalButtons(container) {
+  container.querySelectorAll(".tool-approval").forEach((card) => {
+    if (card.dataset.bound === "true") return;
+    card.dataset.bound = "true";
+    const approvalId = card.dataset.approvalId;
+    const buttons = card.querySelectorAll("button[data-decision]");
+    const status = card.querySelector(".tool-approval__status");
+
+    buttons.forEach((button) => {
+      button.addEventListener("click", async () => {
+        buttons.forEach((item) => { item.disabled = true; });
+        const approved = button.dataset.decision === "approve";
+        status.textContent = approved ? "正在提交批准…" : "正在提交拒绝…";
+        try {
+          const response = await fetch(
+            `/api/tool-approvals/${encodeURIComponent(approvalId)}/decision`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ approved }),
+            }
+          );
+          if (!response.ok) {
+            const data = await response.json();
+            throw new Error(data.detail || `HTTP ${response.status}`);
+          }
+          status.textContent = approved ? "已批准，正在执行…" : "已拒绝，正在生成说明…";
+        } catch (error) {
+          status.textContent = `提交失败：${error.message}`;
+          buttons.forEach((item) => { item.disabled = false; });
+        }
+      });
+    });
+  });
 }
 
 function scrollToBottom() {
@@ -248,7 +367,7 @@ async function submitFeedback(messageId, rating, reason) {
 
 // 更新顶部标题
 function setTitle(title) {
-  currentSessionTitle.textContent = title || "New Chat";
+  currentSessionTitle.textContent = title || "新对话";
 }
 
 // ══════════════════════════════════════════════════════════════
@@ -277,7 +396,7 @@ function renderSessionList(sessions) {
   sessionList.innerHTML = activeSessions
     .map((s) => {
       const isActive = s.id === sessionId;
-      const title = escapeHtml(s.title || "New Chat");
+      const title = escapeHtml(s.title || "新对话");
       const time = formatDate(s.updated_at);
       const count = s.message_count || 0;
       return `
@@ -315,17 +434,27 @@ function renderSessionList(sessions) {
 }
 
 async function switchSession(sid) {
+  const previousSessionId = sessionId;
+  disconnectSessionStream(previousSessionId);
+
   try {
     const resp = await fetch(`/api/session/${sid}`);
     const data = await resp.json();
+    discardPendingAttachments();
     sessionId = data.session_id;
     localStorage.setItem("agentkb_session_id", sessionId);
     setTitle(data.title);
+    if (data.is_generating) {
+      generatingSessions.add(sessionId);
+    } else {
+      generatingSessions.delete(sessionId);
+    }
+    updateComposerState();
 
     // 加载消息历史
-    if (data.message_count > 0) {
+    if (data.message_count > 0 || data.is_generating) {
       hideWelcome();
-      loadMessageHistory(data.session_id);
+      await loadMessageHistory(data.session_id, data.is_generating);
     } else {
       chatContainer.innerHTML = "";
       chatContainer.appendChild(welcomeScreen);
@@ -335,19 +464,20 @@ async function switchSession(sid) {
     loadSessionList();
   } catch (err) {
     showToast("切换会话失败", "error");
+    if (previousSessionId === sessionId && generatingSessions.has(sessionId)) {
+      reconnectStream(sessionId);
+    }
   }
 }
 
-async function loadMessageHistory(sid) {
+async function loadMessageHistory(sid, isGenerating = false) {
   try {
-    const resp = await fetch(`/api/session/${sid}`);
-    const data = await resp.json();
-    // 需要加一个加载消息的端点，或者扩展现有端点
-    // 这里我们使用 loadMessages 直接在后端获取
     const msgsResp = await fetch(`/api/session/${sid}/messages`);
     const msgsData = await msgsResp.json();
-    renderHistoryMessages(msgsData.messages || []);
+    if (sid !== sessionId) return;
+    renderHistoryMessages(msgsData.messages || [], sid, isGenerating);
   } catch (err) {
+    if (sid !== sessionId) return;
     // 降级：清空聊天区
     chatContainer.innerHTML = "";
     chatContainer.appendChild(welcomeScreen);
@@ -355,7 +485,7 @@ async function loadMessageHistory(sid) {
   }
 }
 
-function renderHistoryMessages(messages) {
+function renderHistoryMessages(messages, sid, isGenerating) {
   hideWelcome();
 
   // 移除之前的消息
@@ -364,7 +494,7 @@ function renderHistoryMessages(messages) {
   let lastAiMsg = null;
   messages.forEach((m, idx) => {
     if (m.role === "human") {
-      addUserMessage(m.content);
+      addUserMessage(m.content, m.attachments || []);
     } else if (m.role === "ai") {
       const isLast = idx === messages.length - 1;
       if (isLast) {
@@ -373,6 +503,8 @@ function renderHistoryMessages(messages) {
         const el = addAssistantPlaceholder();
         if (m.content) {
           el.innerHTML = renderMarkdown(m.content);
+        } else {
+          el.innerHTML = '<div class="thinking-indicator"><span></span><span></span><span></span></div>';
         }
       } else {
         addAssistantMessage(m.content);
@@ -380,28 +512,39 @@ function renderHistoryMessages(messages) {
     }
   });
 
+  if (isGenerating && !lastAiMsg) {
+    lastAiMsg = { role: "ai", content: "" };
+    const el = addAssistantPlaceholder();
+    el.innerHTML = '<div class="thinking-indicator"><span></span><span></span><span></span></div>';
+  }
+
   scrollToBottom();
 
-  // 最后一条是 AI 消息 → 尝试重连（任务在跑则续流，已跑完则秒回 done）
-  if (lastAiMsg) {
-    setTimeout(() => reconnectStream(sessionId), 300);
+  if (lastAiMsg && isGenerating) {
+    setTimeout(() => reconnectStream(sid), 50);
   }
 }
 
 async function reconnectStream(sid) {
+  if (sid !== sessionId || streamControllers.has(sid)) return;
+
   // SSE Last-Event-ID 断点续传
   const assistantEl = document.getElementById("current-assistant");
   if (!assistantEl) return;
-  if (isStreaming) return;
 
-  isStreaming = true;
-  sendBtn.disabled = true;
+  const controller = beginSessionStream(sid);
+  let terminal = false;
+  const resumeFromEventId = sessionEventIds.get(sid) || 0;
 
-  // 保留已有内容，后续 token 往后追加
-  let accumulated = assistantEl.textContent.trim() || "";
+  // 刷新后事件 ID 丢失，服务端会完整回放；此时必须从空内容重建，避免重复。
+  let accumulated = resumeFromEventId > 0
+    ? assistantEl.textContent.trim() || ""
+    : "";
   let toolLines = [];
   let throttleTimer = null;
   let finalized = false;
+  let lastSources = null;
+  let lastMessageId = null;
 
   function flushContent() {
     let display = accumulated;
@@ -409,13 +552,21 @@ async function reconnectStream(sid) {
       display += '\n\n<div class="tool-status">' + toolLines.join("<br>") + "</div>";
     }
     assistantEl.innerHTML = renderMarkdown(display);
+    bindApprovalButtons(assistantEl);
     scrollToBottom();
   }
 
   try {
     const response = await fetch(`/api/chat/stream/${sid}`, {
-      headers: { "Last-Event-ID": String(lastEventId) },
+      headers: {
+        "Last-Event-ID": String(resumeFromEventId),
+      },
+      signal: controller.signal,
     });
+    if (!response.ok) {
+      terminal = true;
+      throw new Error(`SSE 请求失败: ${response.status}`);
+    }
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -431,13 +582,17 @@ async function reconnectStream(sid) {
 
       for (const line of lines) {
         if (line.startsWith("id: ")) {
-          lastEventId = parseInt(line.slice(4)) || lastEventId;
+          const eventId = parseInt(line.slice(4));
+          if (eventId) sessionEventIds.set(sid, eventId);
           continue;
         }
         if (!line.startsWith("data: ")) continue;
         try {
           const event = JSON.parse(line.slice(6));
           switch (event.type) {
+            case "message_id":
+              lastMessageId = event.message_id;
+              break;
             case "token":
               accumulated += event.content;
               if (!throttleTimer) {
@@ -458,7 +613,7 @@ async function reconnectStream(sid) {
                     ? JSON.parse(event.output) : event.output;
                   const results = output?.data?.results || [];
                   if (results.length > 0) {
-                    window._lastSources = results.map((r) => ({
+                    lastSources = results.map((r) => ({
                       filename: r.filename || "unknown",
                       score: r.score || 0,
                     }));
@@ -467,25 +622,38 @@ async function reconnectStream(sid) {
               }
               flushContent();
               break;
+            case "approval_required":
+              toolLines.push(renderApprovalCard(event));
+              flushContent();
+              break;
             case "done":
-              if (window._lastSources && window._lastSources.length > 0) {
-                let html = renderMarkdown(accumulated);
-                html = highlightCitations(html, window._lastSources);
-                assistantEl.innerHTML = html;
-                assistantEl.innerHTML += renderSourceCard(window._lastSources);
-                window._lastSources = null;
+              if (throttleTimer) {
+                clearTimeout(throttleTimer);
+                throttleTimer = null;
               }
+              if (lastSources && lastSources.length > 0) {
+                let html = renderMarkdown(accumulated);
+                html = highlightCitations(html, lastSources);
+                assistantEl.innerHTML = html;
+                assistantEl.innerHTML += renderSourceCard(lastSources);
+              } else {
+                assistantEl.innerHTML = renderMarkdown(accumulated);
+              }
+              addFeedbackButtons(assistantEl, lastMessageId);
               finalized = true;
+              terminal = true;
               break;
             case "error":
               accumulated += '\n\n<span style="color:var(--danger)">' + escapeHtml(event.message || "未知错误") + "</span>";
               flushContent();
+              terminal = true;
               break;
           }
         } catch (e) {}
       }
     }
 
+    terminal = true;
     if (throttleTimer) { clearTimeout(throttleTimer); throttleTimer = null; }
     if (!finalized) {
       assistantEl.innerHTML = renderMarkdown(accumulated);
@@ -493,6 +661,8 @@ async function reconnectStream(sid) {
     finalizeAssistant(assistantEl);
     scrollToBottom();
   } catch (err) {
+    if (err.name === "AbortError") return;
+
     // 重连失败（生成已结束），从 DB 加载完整内容兜底
     try {
       const resp = await fetch(`/api/session/${sid}/messages`);
@@ -505,27 +675,54 @@ async function reconnectStream(sid) {
       }
     } catch (e) {}
   } finally {
-    isStreaming = false;
-    sendBtn.disabled = false;
+    if (terminal) {
+      finishSessionStream(sid, controller);
+    } else if (streamControllers.get(sid) === controller) {
+      streamControllers.delete(sid);
+      updateComposerState();
+    }
   }
 }
 
 function createNewSession() {
-  if (isStreaming) return;
+  disconnectSessionStream(sessionId);
+  discardPendingAttachments();
   // 仅在本地生成 ID，后端在首条消息发送时才 ensure_session
   sessionId = crypto.randomUUID().slice(0, 12);
   localStorage.setItem("agentkb_session_id", sessionId);
-  setTitle("New Chat");
+  setTitle("新对话");
   chatContainer.innerHTML = "";
   chatContainer.appendChild(welcomeScreen);
   welcomeScreen.style.display = "";
   msgInput.value = "";
   msgInput.style.height = "auto";
+  renderAttachmentTray();
+  updateComposerState();
   msgInput.focus();
 }
 
+function discardPendingAttachments() {
+  const attachments = pendingAttachments;
+  pendingAttachments = [];
+  renderAttachmentTray();
+  attachments.forEach((attachment) => {
+    fetch(
+      `/api/chat/attachments/${encodeURIComponent(attachment.id)}?session_id=${encodeURIComponent(sessionId)}`,
+      { method: "DELETE" }
+    ).catch(() => {});
+  });
+}
+
 async function deleteSession(sid) {
+  if (generatingSessions.has(sid)) {
+    showToast("该会话仍在生成回复，暂时无法删除", "info");
+    return;
+  }
+
   try {
+    disconnectSessionStream(sid);
+    generatingSessions.delete(sid);
+    sessionEventIds.delete(sid);
     await fetch(`/api/session/${sid}`, { method: "DELETE" });
     if (sid === sessionId) {
       // 删除的是当前会话，创建新会话
@@ -566,17 +763,35 @@ async function loadKnowledgeFiles() {
         const chunks = f.chunk_count || 0;
         const size = formatFileSize(f.file_size || 0);
         const type = (f.file_type || "").toUpperCase();
+        const graphStatus = f.graph_status || "queued";
+        const graphLabels = {
+          disabled: "图谱关闭",
+          queued: "图谱排队",
+          processing: "图谱构建",
+          ready: "图谱就绪",
+          failed: "图谱失败",
+        };
         return `
           <div class="kb-file-item" title="${name} · ${chunks} 分块 · ${size}">
             <span class="file-type-badge">${type}</span>
             <span class="file-name-text">${name}</span>
-            <span class="file-meta">${chunks}块</span>
+            <span class="graph-status ${graphStatus}" title="${escapeHtml(f.graph_error || "")}">
+              ${graphLabels[graphStatus] || graphStatus}
+            </span>
+            ${graphStatus === "failed" ? `
+              <button class="file-reindex-btn" data-id="${f.id}" title="重建知识图谱">↻</button>
+            ` : ""}
             <button class="file-delete-btn" data-id="${f.id}" title="删除文件">
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
             </button>
           </div>`;
       })
       .join("");
+
+    if (knowledgeRefreshTimer) clearTimeout(knowledgeRefreshTimer);
+    if (files.some((file) => ["queued", "processing"].includes(file.graph_status))) {
+      knowledgeRefreshTimer = setTimeout(loadKnowledgeFiles, 3000);
+    }
 
     // 绑定删除事件
     kbFileList.querySelectorAll(".file-delete-btn").forEach((btn) => {
@@ -585,6 +800,23 @@ async function loadKnowledgeFiles() {
         const fileId = btn.dataset.id;
         if (confirm("确定要删除该文件及其知识索引吗？")) {
           await deleteKnowledgeFile(fileId);
+        }
+      });
+    });
+
+    kbFileList.querySelectorAll(".file-reindex-btn").forEach((btn) => {
+      btn.addEventListener("click", async (event) => {
+        event.stopPropagation();
+        const resp = await fetch(
+          `/api/knowledge/graph/reindex/${encodeURIComponent(btn.dataset.id)}`,
+          { method: "POST" }
+        );
+        if (resp.ok) {
+          showToast("知识图谱已重新排队", "info");
+          loadKnowledgeFiles();
+        } else {
+          const data = await resp.json();
+          showToast(data.detail || "重建失败", "error");
         }
       });
     });
@@ -607,6 +839,299 @@ async function deleteKnowledgeFile(fileId) {
   }
 }
 
+async function loadKnowledgeGraph(query = "") {
+  graphResults.innerHTML = '<div class="graph-empty">正在读取知识图谱…</div>';
+  try {
+    const params = new URLSearchParams();
+    if (query.trim()) params.set("query", query.trim());
+    const resp = await fetch(`/api/knowledge/graph?${params.toString()}`);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    const stats = data.stats || {};
+    graphStats.innerHTML = `
+      <div><strong>${stats.entities || 0}</strong><span>实体</span></div>
+      <div><strong>${stats.relations || 0}</strong><span>关系</span></div>
+      <div><strong>${stats.indexed_files || 0}</strong><span>已索引文件</span></div>
+      <div><strong>${stats.pending_files || 0}</strong><span>排队中</span></div>
+    `;
+    const edges = data.edges || [];
+    if (!query.trim()) {
+      graphResults.innerHTML = '<div class="graph-empty">输入实体名称以浏览知识库中的关系证据。</div>';
+      return;
+    }
+    if (edges.length === 0) {
+      graphResults.innerHTML = '<div class="graph-empty">没有找到相关实体关系，可尝试更短的实体名称。</div>';
+      return;
+    }
+    graphResults.innerHTML = edges.map((edge) => `
+      <article class="graph-edge">
+        <div class="graph-edge__relation">
+          <strong>${escapeHtml(edge.source)}</strong>
+          <span>${escapeHtml(edge.predicate)}</span>
+          <strong>${escapeHtml(edge.target)}</strong>
+        </div>
+        <p>${escapeHtml(edge.evidence || "无证据摘要")}</p>
+        <small>来源：${escapeHtml(edge.filename || edge.file_id)}</small>
+      </article>
+    `).join("");
+  } catch (error) {
+    graphResults.innerHTML = `<div class="graph-empty">读取失败：${escapeHtml(error.message)}</div>`;
+  }
+}
+
+function openKnowledgeGraph() {
+  graphOverlay.hidden = false;
+  document.body.classList.add("modal-open");
+  loadKnowledgeGraph();
+  graphQuery.focus();
+}
+
+function closeKnowledgeGraph() {
+  graphOverlay.hidden = true;
+  document.body.classList.remove("modal-open");
+}
+
+async function loadEvaluationCenter() {
+  evalJobs.innerHTML = '<div class="graph-empty">正在读取评估任务…</div>';
+  try {
+    const [jobsResp, baselinesResp, gatesResp] = await Promise.all([
+      fetch("/api/eval/jobs?limit=20"),
+      fetch("/api/eval/baselines?limit=20"),
+      fetch("/api/eval/gates?limit=20"),
+    ]);
+    if (!jobsResp.ok || !baselinesResp.ok || !gatesResp.ok) {
+      throw new Error("评估数据读取失败");
+    }
+    const jobs = (await jobsResp.json()).jobs || [];
+    const baselines = (await baselinesResp.json()).baselines || [];
+    const gates = (await gatesResp.json()).gates || [];
+    const activeScopes = new Set(
+      baselines.filter((item) => item.is_active).map((item) => item.scope)
+    );
+
+    const completed = jobs.filter((job) => job.status === "done");
+    evalJobs.innerHTML = completed.length ? completed.map((job) => `
+      <article class="eval-item">
+        <div><strong>${escapeHtml(job.params.prompt_version || "default")}</strong><small>${escapeHtml(formatDate(job.finished_at))}</small></div>
+        <button type="button" data-create-baseline="${escapeHtml(job.job_id || job.id)}">设为基线</button>
+      </article>
+    `).join("") : '<div class="graph-empty">暂无已完成评估。</div>';
+
+    evalBaselines.innerHTML = baselines.length ? baselines.map((baseline) => `
+      <article class="eval-item">
+        <div>
+          <strong>${escapeHtml(baseline.name)}</strong>
+          <small>${escapeHtml(baseline.scope)}${baseline.is_active ? " · 当前激活" : ""}</small>
+        </div>
+        ${baseline.is_active ? "" : `<button type="button" data-activate-baseline="${escapeHtml(baseline.id)}">激活</button>`}
+      </article>
+    `).join("") : '<div class="graph-empty">暂无评估基线。</div>';
+
+    evalGates.innerHTML = gates.length ? gates.map((gate) => `
+      <article class="eval-item">
+        <div>
+          <strong class="${gate.status === "passed" ? "eval-passed" : "eval-failed"}">${gate.status === "passed" ? "通过" : "失败"}</strong>
+          <small>${escapeHtml(gate.baseline_name)} · ${escapeHtml(formatDate(gate.created_at))}</small>
+        </div>
+      </article>
+    `).join("") : `<div class="graph-empty">${activeScopes.size ? "尚未执行门禁。" : "创建并激活基线后可执行门禁。"}</div>`;
+  } catch (error) {
+    evalJobs.innerHTML = `<div class="graph-empty">读取失败：${escapeHtml(error.message)}</div>`;
+  }
+}
+
+async function createEvaluationBaseline(jobId) {
+  const name = window.prompt("请输入基线名称", `baseline-${new Date().toISOString().slice(0, 10)}`);
+  if (!name || !name.trim()) return;
+  const response = await fetch("/api/eval/baselines", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ job_id: jobId, name: name.trim(), activate: true }),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.detail || "创建基线失败");
+  showToast("评估基线已创建并激活", "success");
+  await loadEvaluationCenter();
+}
+
+async function activateEvaluationBaseline(baselineId) {
+  const response = await fetch(`/api/eval/baselines/${encodeURIComponent(baselineId)}/activate`, {
+    method: "POST",
+  });
+  if (!response.ok) throw new Error("激活基线失败");
+  showToast("评估基线已激活", "success");
+  await loadEvaluationCenter();
+}
+
+function openEvaluationCenter() {
+  evalOverlay.hidden = false;
+  document.body.classList.add("modal-open");
+  loadEvaluationCenter();
+}
+
+function closeEvaluationCenter() {
+  evalOverlay.hidden = true;
+  document.body.classList.remove("modal-open");
+}
+
+async function loadCustomAgents() {
+  customAgentList.innerHTML = '<div class="graph-empty">正在读取 Agent…</div>';
+  const response = await fetch("/api/agents");
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.detail || "读取 Agent 失败");
+  availableAgentTools = data.tools || [];
+  const agents = data.agents || [];
+  customAgentList.innerHTML = agents.length ? agents.map((agent) => `
+    <article class="eval-item agent-list-item">
+      <div>
+        <strong>${escapeHtml(agent.display_name)}</strong>
+        <small>${escapeHtml(agent.name)} · ${escapeHtml(agent.intents.join(", "))}</small>
+        <p>${escapeHtml(agent.description)}</p>
+      </div>
+      <div class="agent-item-actions">
+        <button type="button" data-agent-status="${escapeHtml(agent.id)}" data-next-status="${agent.status === "active" ? "disabled" : "active"}">
+          ${agent.status === "active" ? "停用" : "启用"}
+        </button>
+        <button type="button" data-delete-agent="${escapeHtml(agent.id)}">删除</button>
+      </div>
+    </article>
+  `).join("") : '<div class="graph-empty">尚未创建自定义 Agent。</div>';
+}
+
+function populateAgentDraft(draft) {
+  $("#agent-name").value = draft.name;
+  $("#agent-display-name").value = draft.display_name;
+  $("#agent-description").value = draft.description;
+  $("#agent-instructions").value = draft.instructions;
+  $("#agent-intents").value = draft.intents.join(", ");
+  const selected = new Set(draft.allowed_tools || []);
+  agentTools.innerHTML = availableAgentTools.length
+    ? availableAgentTools.map((tool) => `
+      <label title="${escapeHtml(tool.description)}">
+        <input type="checkbox" value="${escapeHtml(tool.name)}" ${selected.has(tool.name) ? "checked" : ""}>
+        <span>${escapeHtml(tool.name)}</span>
+      </label>
+    `).join("")
+    : '<span class="graph-empty">没有可分配的低风险工具。</span>';
+  agentConfirmForm.hidden = false;
+}
+
+async function generateAgentDraft(request) {
+  const response = await fetch("/api/agents/draft", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ request }),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.detail || "草案生成失败");
+  populateAgentDraft(data.draft);
+}
+
+async function confirmAgentDraft() {
+  const draft = {
+    name: $("#agent-name").value.trim(),
+    display_name: $("#agent-display-name").value.trim(),
+    description: $("#agent-description").value.trim(),
+    instructions: $("#agent-instructions").value.trim(),
+    intents: $("#agent-intents").value.split(",").map((item) => item.trim()).filter(Boolean),
+    allowed_tools: Array.from(agentTools.querySelectorAll("input:checked")).map((item) => item.value),
+    model_name: null,
+  };
+  const response = await fetch("/api/agents", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(draft),
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.detail || "创建 Agent 失败");
+  agentConfirmForm.hidden = true;
+  agentDraftForm.reset();
+  showToast(`${data.agent.display_name} 已注册`, "success");
+  await loadCustomAgents();
+}
+
+function openAgentStudio() {
+  agentsOverlay.hidden = false;
+  document.body.classList.add("modal-open");
+  loadCustomAgents().catch((error) => {
+    customAgentList.innerHTML = `<div class="graph-empty">${escapeHtml(error.message)}</div>`;
+  });
+}
+
+function closeAgentStudio() {
+  agentsOverlay.hidden = true;
+  document.body.classList.remove("modal-open");
+}
+
+function parseJsonObject(selector, label) {
+  const value = $(selector).value.trim();
+  if (!value) return {};
+  const parsed = JSON.parse(value);
+  if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
+    throw new Error(`${label} 必须是 JSON 对象`);
+  }
+  return parsed;
+}
+
+function renderMcpServer(server) {
+  const connected = server.connection_status === "connected";
+  const tools = server.tools || [];
+  return `
+    <article class="mcp-server">
+      <div class="mcp-server__header">
+        <div>
+          <strong>${escapeHtml(server.name)}</strong>
+          <small>${escapeHtml(server.transport)} · ${tools.length} 个工具</small>
+        </div>
+        <span class="mcp-status" data-status="${escapeHtml(server.connection_status)}">${escapeHtml(server.connection_status)}</span>
+      </div>
+      ${server.last_error ? `<div class="eval-failed">${escapeHtml(server.last_error)}</div>` : ""}
+      <div class="mcp-server__actions">
+        ${connected
+          ? `<button type="button" data-mcp-action="refresh" data-server-id="${escapeHtml(server.id)}">刷新工具</button>
+             <button type="button" data-mcp-action="disconnect" data-server-id="${escapeHtml(server.id)}">断开</button>`
+          : `<button type="button" data-mcp-action="connect" data-server-id="${escapeHtml(server.id)}">连接</button>`}
+        <button type="button" data-mcp-action="delete" data-server-id="${escapeHtml(server.id)}">删除</button>
+      </div>
+      ${tools.length ? `<div class="mcp-tools">${tools.map((tool) => `
+        <label class="mcp-tool" title="${escapeHtml(tool.description)}">
+          <span>
+            <strong>${escapeHtml(tool.remote_name)}</strong>
+            <small>${tool.requires_confirmation ? "需要人工确认" : "可直接调用"}</small>
+          </span>
+          <input type="checkbox"
+                 data-mcp-tool="${escapeHtml(tool.remote_name)}"
+                 data-server-id="${escapeHtml(server.id)}"
+                 ${tool.enabled ? "checked" : ""}>
+        </label>
+      `).join("")}</div>` : ""}
+    </article>
+  `;
+}
+
+async function loadMcpServers() {
+  mcpServerList.innerHTML = '<div class="graph-empty">正在读取 MCP 服务…</div>';
+  const response = await fetch("/api/mcp/servers");
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.detail || "读取 MCP 服务失败");
+  mcpServerList.innerHTML = data.servers.length
+    ? data.servers.map(renderMcpServer).join("")
+    : '<div class="graph-empty">尚未配置 MCP 服务。</div>';
+}
+
+function openMcpCenter() {
+  mcpOverlay.hidden = false;
+  document.body.classList.add("modal-open");
+  loadMcpServers().catch((error) => {
+    mcpServerList.innerHTML = `<div class="graph-empty">${escapeHtml(error.message)}</div>`;
+  });
+}
+
+function closeMcpCenter() {
+  mcpOverlay.hidden = true;
+  document.body.classList.remove("modal-open");
+}
+
 // ══════════════════════════════════════════════════════════════
 //  消息渲染
 // ══════════════════════════════════════════════════════════════
@@ -617,11 +1142,14 @@ function hideWelcome() {
   }
 }
 
-function addUserMessage(text) {
+function addUserMessage(text, attachments = []) {
   hideWelcome();
   const el = document.createElement("div");
   el.className = "message user";
-  el.textContent = text;
+  const images = attachments.map((attachment) => `
+    <img class="message-image" src="/api/chat/attachments/${encodeURIComponent(attachment.id)}" alt="${escapeHtml(attachment.name || "图片附件")}">
+  `).join("");
+  el.innerHTML = `${images}${text ? `<div>${escapeHtml(text)}</div>` : ""}`;
   chatContainer.appendChild(el);
   scrollToBottom();
 }
@@ -657,11 +1185,16 @@ function updateSessionTitleInSidebar() {
 // ══════════════════════════════════════════════════════════════
 
 async function sendMessage(text) {
-  if (isStreaming || !text.trim()) return;
-  isStreaming = true;
-  sendBtn.disabled = true;
+  const targetSessionId = sessionId;
+  if (
+    generatingSessions.has(targetSessionId)
+    || (!text.trim() && pendingAttachments.length === 0)
+  ) return;
+  const attachments = pendingAttachments.slice();
+  sessionEventIds.set(targetSessionId, 0);
+  const controller = beginSessionStream(targetSessionId);
 
-  addUserMessage(text);
+  addUserMessage(text, attachments);
   const assistantEl = addAssistantPlaceholder();
   // 思考动画
   assistantEl.innerHTML = '<div class="thinking-indicator"><span></span><span></span><span></span></div>';
@@ -671,9 +1204,10 @@ async function sendMessage(text) {
   let toolLines = [];
   let throttleTimer = null;
   let finalized = false;
-  window._lastSources = null;
-  window._lastTrace = null;
-  window._lastMsgId = null;
+  let terminal = false;
+  let lastSources = null;
+  let lastTrace = null;
+  let lastMessageId = null;
 
   function flushContent() {
     let display = accumulated;
@@ -681,6 +1215,7 @@ async function sendMessage(text) {
       display += '\n\n<div class="tool-status">' + toolLines.join("<br>") + "</div>";
     }
     assistantEl.innerHTML = renderMarkdown(display);
+    bindApprovalButtons(assistantEl);
     scrollToBottom();
   }
 
@@ -688,8 +1223,21 @@ async function sendMessage(text) {
     const response = await fetch("/api/chat/stream", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: text, session_id: sessionId, mode: agentMode }),
+      body: JSON.stringify({
+        message: text,
+        session_id: targetSessionId,
+        mode: agentMode,
+        attachment_ids: attachments.map((attachment) => attachment.id),
+      }),
+      signal: controller.signal,
     });
+    if (!response.ok) {
+      terminal = true;
+      const data = await response.json().catch(() => ({}));
+      throw new Error(data.detail || `SSE 请求失败: ${response.status}`);
+    }
+    pendingAttachments = [];
+    renderAttachmentTray();
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -705,7 +1253,8 @@ async function sendMessage(text) {
 
       for (const line of lines) {
         if (line.startsWith("id: ")) {
-          lastEventId = parseInt(line.slice(4)) || lastEventId;
+          const eventId = parseInt(line.slice(4));
+          if (eventId) sessionEventIds.set(targetSessionId, eventId);
           continue;
         }
         if (!line.startsWith("data: ")) continue;
@@ -713,7 +1262,7 @@ async function sendMessage(text) {
           const event = JSON.parse(line.slice(6));
           switch (event.type) {
             case "message_id":
-              window._lastMsgId = event.message_id;
+              lastMessageId = event.message_id;
               break;
 
             case "token":
@@ -767,7 +1316,7 @@ async function sendMessage(text) {
                     ? JSON.parse(event.output) : event.output;
                   const results = output?.data?.results || [];
                   if (results.length > 0) {
-                    window._lastSources = results.map((r) => ({
+                    lastSources = results.map((r) => ({
                       filename: r.filename || "unknown",
                       score: r.score || 0,
                     }));
@@ -790,8 +1339,13 @@ async function sendMessage(text) {
               }
               // 提取 trace 数据
               if (event.trace) {
-                window._lastTrace = event.trace;
+                lastTrace = event.trace;
               }
+              flushContent();
+              break;
+
+            case "approval_required":
+              toolLines.push(renderApprovalCard(event));
               flushContent();
               break;
 
@@ -800,21 +1354,22 @@ async function sendMessage(text) {
                 clearTimeout(throttleTimer);
                 throttleTimer = null;
               }
-              if (window._lastSources && window._lastSources.length > 0) {
+              if (lastSources && lastSources.length > 0) {
                 let html = renderMarkdown(accumulated);
-                html = highlightCitations(html, window._lastSources);
+                html = highlightCitations(html, lastSources);
                 assistantEl.innerHTML = html;
-                assistantEl.innerHTML += renderSourceCard(window._lastSources);
+                assistantEl.innerHTML += renderSourceCard(lastSources);
               } else {
                 assistantEl.innerHTML = renderMarkdown(accumulated);
               }
-              if (window._lastTrace) {
-                assistantEl.innerHTML += renderTimingPanel(window._lastTrace);
+              if (lastTrace) {
+                assistantEl.innerHTML += renderTimingPanel(lastTrace);
               }
-              addFeedbackButtons(assistantEl, window._lastMsgId);
+              addFeedbackButtons(assistantEl, lastMessageId);
               finalizeAssistant(assistantEl);
               scrollToBottom();
               finalized = true;
+              terminal = true;
               break;
 
             case "error":
@@ -823,6 +1378,7 @@ async function sendMessage(text) {
                 escapeHtml(event.message || "未知错误") +
                 "</span>";
               flushContent();
+              terminal = true;
               break;
           }
         } catch (e) {
@@ -831,13 +1387,14 @@ async function sendMessage(text) {
       }
     }
 
+    terminal = true;
     if (!finalized) {
       if (throttleTimer) {
         clearTimeout(throttleTimer);
         throttleTimer = null;
       }
       assistantEl.innerHTML = renderMarkdown(accumulated);
-      addFeedbackButtons(assistantEl, window._lastMsgId);
+      addFeedbackButtons(assistantEl, lastMessageId);
       finalizeAssistant(assistantEl);
       scrollToBottom();
     }
@@ -845,18 +1402,24 @@ async function sendMessage(text) {
     // 更新侧边栏会话列表（标题可能变化）
     loadSessionList();
   } catch (err) {
+    if (err.name === "AbortError") return;
+
     assistantEl.innerHTML = renderMarkdown(
       accumulated +
         '\n\n<span style="color:var(--danger)">请求失败: ' +
         escapeHtml(err.message) +
         "</span>"
     );
-    addFeedbackButtons(assistantEl, window._lastMsgId);
+    addFeedbackButtons(assistantEl, lastMessageId);
     finalizeAssistant(assistantEl);
   } finally {
-    isStreaming = false;
-    sendBtn.disabled = false;
-    msgInput.focus();
+    if (terminal) {
+      finishSessionStream(targetSessionId, controller);
+    } else if (streamControllers.get(targetSessionId) === controller) {
+      streamControllers.delete(targetSessionId);
+      updateComposerState();
+    }
+    if (targetSessionId === sessionId) msgInput.focus();
   }
 }
 
@@ -898,12 +1461,97 @@ async function uploadFiles(files) {
   }
 }
 
+async function uploadChatImages(files) {
+  const remaining = 4 - pendingAttachments.length;
+  const selected = Array.from(files).slice(0, remaining);
+  if (selected.length === 0) {
+    showToast("每条消息最多添加 4 张图片", "error");
+    return;
+  }
+  for (const file of selected) {
+    const formData = new FormData();
+    formData.append("file", file);
+    const response = await fetch(
+      `/api/chat/attachments?session_id=${encodeURIComponent(sessionId)}`,
+      { method: "POST", body: formData }
+    );
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data.detail || `图片上传失败: ${file.name}`);
+    }
+    pendingAttachments.push(data);
+    renderAttachmentTray();
+  }
+  msgInput.focus();
+}
+
+async function removePendingAttachment(attachmentId) {
+  const response = await fetch(
+    `/api/chat/attachments/${encodeURIComponent(attachmentId)}?session_id=${encodeURIComponent(sessionId)}`,
+    { method: "DELETE" }
+  );
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.detail || "移除图片失败");
+  }
+  pendingAttachments = pendingAttachments.filter(
+    (attachment) => attachment.id !== attachmentId
+  );
+  renderAttachmentTray();
+}
+
+async function toggleRecording() {
+  if (mediaRecorder?.state === "recording") {
+    mediaRecorder.stop();
+    return;
+  }
+  if (!navigator.mediaDevices?.getUserMedia || !window.MediaRecorder) {
+    showToast("当前浏览器不支持录音", "error");
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    recordedChunks = [];
+    mediaRecorder = new MediaRecorder(stream);
+    mediaRecorder.addEventListener("dataavailable", (event) => {
+      if (event.data.size > 0) recordedChunks.push(event.data);
+    });
+    mediaRecorder.addEventListener("stop", async () => {
+      recordButton.classList.remove("recording");
+      recordButton.querySelector("span").textContent = "语音";
+      stream.getTracks().forEach((track) => track.stop());
+      const audio = new Blob(recordedChunks, { type: mediaRecorder.mimeType });
+      const formData = new FormData();
+      formData.append("file", audio, "recording.webm");
+      try {
+        showToast("正在转写语音…", "info");
+        const response = await fetch("/api/transcribe", {
+          method: "POST",
+          body: formData,
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || "语音转写失败");
+        msgInput.value = [msgInput.value.trim(), data.text].filter(Boolean).join(" ");
+        msgInput.dispatchEvent(new Event("input"));
+        msgInput.focus();
+      } catch (error) {
+        showToast(error.message, "error");
+      }
+    });
+    mediaRecorder.start();
+    recordButton.classList.add("recording");
+    recordButton.querySelector("span").textContent = "停止";
+  } catch (error) {
+    showToast(`无法开始录音：${error.message}`, "error");
+  }
+}
+
 // ══════════════════════════════════════════════════════════════
 //  清空会话
 // ══════════════════════════════════════════════════════════════
 
 async function clearSession() {
-  if (isStreaming) return;
+  if (generatingSessions.has(sessionId)) return;
   try {
     const resp = await fetch("/api/session/clear", {
       method: "POST",
@@ -911,6 +1559,7 @@ async function clearSession() {
       body: JSON.stringify({ session_id: sessionId }),
     });
     const data = await resp.json();
+    discardPendingAttachments();
     sessionId = data.session_id;
     localStorage.setItem("agentkb_session_id", sessionId);
     setTitle(data.title);
@@ -918,6 +1567,7 @@ async function clearSession() {
     chatContainer.appendChild(welcomeScreen);
     welcomeScreen.style.display = "";
     msgInput.value = "";
+    updateComposerState();
     loadSessionList();
     showToast("会话已清空", "info");
   } catch (err) {
@@ -934,11 +1584,8 @@ async function clearSession() {
 
 function toggleSidebar() {
   sidebarVisible = !sidebarVisible;
-  if (sidebarVisible) {
-    sidebar.classList.remove("collapsed");
-  } else {
-    sidebar.classList.add("collapsed");
-  }
+  sidebar.classList.toggle("collapsed", !sidebarVisible);
+  sidebarToggle.setAttribute("aria-expanded", String(sidebarVisible));
   localStorage.setItem("agentkb_sidebar_visible", sidebarVisible);
 }
 
@@ -949,23 +1596,31 @@ function toggleSidebar() {
 async function init() {
   // 恢复侧边栏状态
   const savedVisibility = localStorage.getItem("agentkb_sidebar_visible");
-  if (savedVisibility === "false") {
-    sidebarVisible = false;
-    sidebar.classList.add("collapsed");
-  }
+  sidebarVisible = savedVisibility === null
+    ? !window.matchMedia("(max-width: 900px)").matches
+    : savedVisibility === "true";
+  sidebar.classList.toggle("collapsed", !sidebarVisible);
+  sidebarToggle.setAttribute("aria-expanded", String(sidebarVisible));
 
   // 加载知识库文件
   loadKnowledgeFiles();
 
   // 初始化会话
   let hasHistory = false;
+  let hasExistingSession = false;
   if (sessionId) {
     try {
       const resp = await fetch(`/api/session/${sessionId}`);
       const data = await resp.json();
-      if (data.message_count > 0) {
+      hasExistingSession = true;
+      if (data.is_generating) {
+        generatingSessions.add(sessionId);
+      } else {
+        generatingSessions.delete(sessionId);
+      }
+      if (data.message_count > 0 || data.is_generating) {
         setTitle(data.title);
-        loadMessageHistory(sessionId);
+        loadMessageHistory(sessionId, data.is_generating);
         hasHistory = true;
       }
     } catch (err) {
@@ -973,12 +1628,22 @@ async function init() {
     }
   }
 
-  if (!hasHistory) {
+  if (!hasHistory && !hasExistingSession) {
     sessionId = crypto.randomUUID().slice(0, 12);
     localStorage.setItem("agentkb_session_id", sessionId);
   }
 
+  updateComposerState();
   loadSessionList();
+
+  try {
+    const response = await fetch("/api/capabilities");
+    const capabilities = await response.json();
+    recordButton.hidden = !capabilities.transcription?.enabled;
+    chatImageInput.disabled = !capabilities.vision?.enabled;
+  } catch (error) {
+    recordButton.hidden = true;
+  }
 
   // 设置用户信息
   const userName = localStorage.getItem("agentkb_user_name") || "本地用户";
@@ -996,7 +1661,7 @@ async function init() {
 
 sendBtn.addEventListener("click", () => {
   const text = msgInput.value.trim();
-  if (!text) return;
+  if (!text && pendingAttachments.length === 0) return;
   msgInput.value = "";
   msgInput.style.height = "auto";
   sendMessage(text);
@@ -1006,7 +1671,7 @@ msgInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) {
     e.preventDefault();
     const text = msgInput.value.trim();
-    if (!text) return;
+    if (!text && pendingAttachments.length === 0) return;
     msgInput.value = "";
     msgInput.style.height = "auto";
     sendMessage(text);
@@ -1014,6 +1679,168 @@ msgInput.addEventListener("keydown", (e) => {
 });
 
 $("#btn-upload").addEventListener("click", () => uploadInput.click());
+$("#btn-graph").addEventListener("click", openKnowledgeGraph);
+$("#btn-eval").addEventListener("click", openEvaluationCenter);
+$("#btn-agents").addEventListener("click", openAgentStudio);
+$("#btn-mcp").addEventListener("click", openMcpCenter);
+$("#btn-close-graph").addEventListener("click", closeKnowledgeGraph);
+$("#btn-close-eval").addEventListener("click", closeEvaluationCenter);
+$("#btn-close-agents").addEventListener("click", closeAgentStudio);
+$("#btn-close-mcp").addEventListener("click", closeMcpCenter);
+$("#graph-search").addEventListener("submit", (event) => {
+  event.preventDefault();
+  loadKnowledgeGraph(graphQuery.value);
+});
+graphOverlay.addEventListener("click", (event) => {
+  if (event.target === graphOverlay) closeKnowledgeGraph();
+});
+evalOverlay.addEventListener("click", (event) => {
+  if (event.target === evalOverlay) closeEvaluationCenter();
+});
+evalOverlay.addEventListener("click", async (event) => {
+  const createButton = event.target.closest("[data-create-baseline]");
+  const activateButton = event.target.closest("[data-activate-baseline]");
+  try {
+    if (createButton) {
+      await createEvaluationBaseline(createButton.dataset.createBaseline);
+    } else if (activateButton) {
+      await activateEvaluationBaseline(activateButton.dataset.activateBaseline);
+    }
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+});
+agentsOverlay.addEventListener("click", (event) => {
+  if (event.target === agentsOverlay) closeAgentStudio();
+});
+mcpOverlay.addEventListener("click", (event) => {
+  if (event.target === mcpOverlay) closeMcpCenter();
+});
+$("#mcp-transport").addEventListener("change", (event) => {
+  const isStdio = event.target.value === "stdio";
+  $("#mcp-command-field").hidden = !isStdio;
+  $("#mcp-args-field").hidden = !isStdio;
+  $("#mcp-url-field").hidden = isStdio;
+});
+mcpServerForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    const transport = $("#mcp-transport").value;
+    const payload = {
+      name: $("#mcp-name").value.trim(),
+      transport,
+      command: transport === "stdio" ? $("#mcp-command").value.trim() : null,
+      args: transport === "stdio"
+        ? $("#mcp-args").value.split("\n").map((item) => item.trim()).filter(Boolean)
+        : [],
+      url: transport === "streamable_http" ? $("#mcp-url").value.trim() : null,
+      env: parseJsonObject("#mcp-env", "环境变量"),
+      headers: parseJsonObject("#mcp-headers", "请求头"),
+      confirmation_policy: $("#mcp-confirmation-policy").value,
+    };
+    const response = await fetch("/api/mcp/servers", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || "创建 MCP 服务失败");
+    mcpServerForm.reset();
+    $("#mcp-transport").dispatchEvent(new Event("change"));
+    showToast("MCP 服务配置已创建，请手动连接", "success");
+    await loadMcpServers();
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+});
+mcpServerList.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-mcp-action]");
+  if (!button) return;
+  const action = button.dataset.mcpAction;
+  if (action === "delete" && !window.confirm("确认删除这个 MCP 服务及其工具配置？")) return;
+  button.disabled = true;
+  try {
+    const baseUrl = `/api/mcp/servers/${encodeURIComponent(button.dataset.serverId)}`;
+    const response = await fetch(
+      action === "delete" ? baseUrl : `${baseUrl}/${action}`,
+      { method: action === "delete" ? "DELETE" : "POST" },
+    );
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.detail || `MCP ${action} 操作失败`);
+    await loadMcpServers();
+  } catch (error) {
+    showToast(error.message, "error");
+    button.disabled = false;
+  }
+});
+mcpServerList.addEventListener("change", async (event) => {
+  const input = event.target.closest("[data-mcp-tool]");
+  if (!input) return;
+  try {
+    const response = await fetch(
+      `/api/mcp/servers/${encodeURIComponent(input.dataset.serverId)}/tools/${encodeURIComponent(input.dataset.mcpTool)}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: input.checked }),
+      },
+    );
+    if (!response.ok) throw new Error("更新 MCP 工具状态失败");
+  } catch (error) {
+    input.checked = !input.checked;
+    showToast(error.message, "error");
+  }
+});
+agentDraftForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const request = $("#agent-request").value.trim();
+  if (!request) return;
+  const button = agentDraftForm.querySelector("button[type=submit]");
+  button.disabled = true;
+  button.textContent = "正在生成…";
+  try {
+    await generateAgentDraft(request);
+  } catch (error) {
+    showToast(error.message, "error");
+  } finally {
+    button.disabled = false;
+    button.textContent = "生成配置草案";
+  }
+});
+agentConfirmForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  try {
+    await confirmAgentDraft();
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+});
+$("#btn-cancel-agent-draft").addEventListener("click", () => {
+  agentConfirmForm.hidden = true;
+});
+customAgentList.addEventListener("click", async (event) => {
+  const statusButton = event.target.closest("[data-agent-status]");
+  const deleteButton = event.target.closest("[data-delete-agent]");
+  try {
+    if (statusButton) {
+      const response = await fetch(`/api/agents/${encodeURIComponent(statusButton.dataset.agentStatus)}/status`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: statusButton.dataset.nextStatus }),
+      });
+      if (!response.ok) throw new Error("更新 Agent 状态失败");
+      await loadCustomAgents();
+    } else if (deleteButton && window.confirm("确认删除这个自定义 Agent？")) {
+      const response = await fetch(`/api/agents/${encodeURIComponent(deleteButton.dataset.deleteAgent)}`, {
+        method: "DELETE",
+      });
+      if (!response.ok) throw new Error("删除 Agent 失败");
+      await loadCustomAgents();
+    }
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+});
 
 uploadInput.addEventListener("change", () => {
   if (uploadInput.files.length > 0) {
@@ -1021,10 +1848,39 @@ uploadInput.addEventListener("change", () => {
     uploadInput.value = "";
   }
 });
+chatImageInput.addEventListener("change", async () => {
+  if (chatImageInput.files.length > 0) {
+    try {
+      await uploadChatImages(chatImageInput.files);
+    } catch (error) {
+      showToast(error.message, "error");
+    }
+    chatImageInput.value = "";
+  }
+});
+attachmentTray.addEventListener("click", async (event) => {
+  const button = event.target.closest("[data-remove-attachment]");
+  if (!button) return;
+  try {
+    await removePendingAttachment(button.dataset.removeAttachment);
+  } catch (error) {
+    showToast(error.message, "error");
+  }
+});
+recordButton.addEventListener("click", toggleRecording);
 
 $("#btn-clear").addEventListener("click", clearSession);
 $("#btn-new-chat").addEventListener("click", createNewSession);
-$("#btn-toggle-sidebar").addEventListener("click", toggleSidebar);
+sidebarToggle.addEventListener("click", toggleSidebar);
+sidebarBackdrop.addEventListener("click", () => {
+  if (sidebarVisible) toggleSidebar();
+});
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && sidebarVisible && window.matchMedia("(max-width: 900px)").matches) {
+    toggleSidebar();
+  }
+});
 
 // 欢迎页提示词点击
 document.addEventListener("click", (e) => {
@@ -1067,10 +1923,10 @@ if (modeToggle) {
 function updateModeUI() {
   if (modeToggle && modeLabel) {
     if (agentMode === "auto") {
-      modeLabel.textContent = "🧠 多Agent";
+      modeLabel.textContent = "多 Agent";
       modeToggle.classList.add("active");
     } else {
-      modeLabel.textContent = "🤖 单Agent";
+      modeLabel.textContent = "单 Agent";
       modeToggle.classList.remove("active");
     }
   }

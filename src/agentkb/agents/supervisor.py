@@ -12,8 +12,6 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any
-
 from loguru import logger
 
 SUPERVISOR_PROMPT = """你是 AgentKB 的总调度员，负责理解用户意图并将任务指派给合适的 Specialist Agent。
@@ -43,13 +41,27 @@ SUPERVISOR_PROMPT = """你是 AgentKB 的总调度员，负责理解用户意图
 - 管理任务/项目 → intent="task_management", assigned_agent="task_manager"
 - 学习辅导/教程 → intent="learning", assigned_agent="learning_tutor"
 - 社媒内容（小红书/抖音等） → intent="social_content", assigned_agent="social_writer"
+- 保存或查询跨会话记忆 → intent="personal_memory", assigned_agent="memory_agent"
+
+除上述内置场景外，如“可用 Agent”中存在职责明确匹配的自定义 Agent，
+必须使用其 name 作为 assigned_agent，并使用其 intents 中最匹配的一项作为 intent。
+
+复杂请求应拆成多个子任务。无依赖的子任务可以并行；后续子任务通过 dependencies
+引用前置子任务 id。每个子任务必须包含 id、description、assigned_agent、dependencies。
 
 ## 输出格式（严格 JSON，不要包含 markdown 标记，assigned_agent 不要用字符串 "null"）
 {{
-  "intent": "chat",
+  "intent": "knowledge_search",
   "reasoning": "判断依据",
-  "direct_reply": "当 intent=chat 时这里是完整回复内容，其他情况填 null",
-  "subtasks": []
+  "direct_reply": null,
+  "subtasks": [
+    {{
+      "id": 1,
+      "description": "明确、可执行的子任务",
+      "assigned_agent": "knowledge_agent",
+      "dependencies": []
+    }}
+  ]
 }}"""
 
 
@@ -113,12 +125,27 @@ class SupervisorAgent:
             data = json.loads(content)
 
             subtasks = []
-            for st in data.get("subtasks", []):
+            used_ids: set[int] = set()
+            for index, st in enumerate(data.get("subtasks", []), 1):
+                task_id = st.get("id")
+                if (
+                    not isinstance(task_id, int)
+                    or task_id <= 0
+                    or task_id in used_ids
+                ):
+                    task_id = index
+                    while task_id in used_ids:
+                        task_id += 1
+                used_ids.add(task_id)
                 subtasks.append(SubTask(
-                    id=st.get("id", 0),
+                    id=task_id,
                     description=st.get("description", ""),
                     assigned_agent=st.get("assigned_agent", ""),
-                    dependencies=st.get("dependencies", []),
+                    dependencies=[
+                        dependency
+                        for dependency in st.get("dependencies", [])
+                        if isinstance(dependency, int)
+                    ],
                 ))
 
             return TaskDecomposition(
@@ -141,6 +168,28 @@ class SupervisorAgent:
     def _fast_route(query: str) -> TaskDecomposition | None:
         """快速关键词路由——命中明确场景直接返回，不需要 LLM。"""
         q = query.strip().lower()
+
+        memory_kw = [
+            "记住",
+            "以后记得",
+            "你还记得",
+            "我的偏好",
+            "我之前说过",
+            "忘记",
+            "remember",
+            "forget",
+        ]
+        if any(keyword in q for keyword in memory_kw):
+            return TaskDecomposition(
+                intent="personal_memory",
+                subtasks=[
+                    SubTask(
+                        id=1,
+                        description=query,
+                        assigned_agent="memory_agent",
+                    )
+                ],
+            )
 
         # 纯闲聊和能力询问——不调用 LLM 直接回复
         chat_kw = [

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -16,18 +17,47 @@ def create_app(graph, multi_agent_graph=None) -> FastAPI:
     if multi_agent_graph is not None:
         init_multi_agent_graph(multi_agent_graph)
 
-    app = FastAPI(title="AgentKB API", version="0.1.0")
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        from agentkb.knowledge.graph import resume_knowledge_graph_indexing
+        from agentkb.mcp.manager import get_mcp_manager
+        from agentkb.storage.pg_database import get_db
+
+        await resume_knowledge_graph_indexing()
+        stale_attachments = get_db().cleanup_stale_chat_attachments()
+        for filepath in stale_attachments:
+            Path(filepath).unlink(missing_ok=True)
+        mcp_manager = get_mcp_manager()
+        from agentkb.config.settings import Settings
+
+        if Settings.load().mcp_enabled:
+            await mcp_manager.start()
+        try:
+            yield
+        finally:
+            await mcp_manager.stop()
+
+    app = FastAPI(
+        title="AgentKB API",
+        version="0.1.0",
+        lifespan=lifespan,
+    )
 
     from agentkb.api.routes import router
 
     app.include_router(router, prefix="/api")
 
-    # 注册评估 API 路由
-    try:
-        from agentkb.eval.api import router as eval_router
-        app.include_router(eval_router, prefix="/api")
-    except ImportError:
-        pass
+    from agentkb.eval.api import router as eval_router
+
+    app.include_router(eval_router, prefix="/api")
+
+    from agentkb.agents.api import router as agents_router
+
+    app.include_router(agents_router, prefix="/api")
+
+    from agentkb.mcp.api import router as mcp_router
+
+    app.include_router(mcp_router, prefix="/api")
 
     static_dir = Path(__file__).resolve().parent.parent.parent.parent / "static"
     if static_dir.exists():

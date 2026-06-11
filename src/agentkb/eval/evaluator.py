@@ -14,13 +14,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
-
 from loguru import logger
 
 from agentkb.eval.metrics import EvalResult, compute_metrics
 from agentkb.eval.testset import TestSet
-from agentkb.eval.generation_eval import GenerationEval, GenerationEvalResult
+from agentkb.eval.generation_eval import GenerationEval
 from agentkb.config.settings import Settings
 
 

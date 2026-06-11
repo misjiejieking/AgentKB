@@ -3,23 +3,29 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import time
+from contextvars import Context
 from pathlib import Path
-from typing import Any
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
 from loguru import logger
+from psycopg2 import IntegrityError
+from pydantic import BaseModel, Field
 
 from agentkb.eval.jobs import get_job_manager, EvalJob, JobStatus
 from agentkb.eval.evaluator import Evaluator
 from agentkb.eval.testset import TestSet
 from agentkb.eval.metrics import EvalResult, compute_metrics
-from agentkb.eval.reporter import render_result_markdown, render_diff_markdown
+from agentkb.eval.reporter import render_result_markdown
+from agentkb.eval.quality_gate import (
+    GatePolicy,
+    QualityGateService,
+    build_evaluation_signature,
+)
 from agentkb.config.settings import Settings
 
 router = APIRouter(prefix="/eval", tags=["evaluation"])
+_eval_tasks: set[asyncio.Task] = set()
 
 
 # ══════════════════════════════════════════════════════════════
@@ -33,20 +39,41 @@ class EvalSubmitRequest(BaseModel):
     testset_path: str | None = Field(default=None, description="已有测试集 JSON 文件路径")
     # 模型配置
     model_name: str | None = Field(default=None, description="覆盖默认 LLM 模型")
-    embedding_model: str | None = Field(default=None, description="覆盖默认 Embedding 模型")
     # 评估参数
-    k_values: list[int] = Field(default=[5, 10, 20], description="Recall@K 的 K 值列表")
+    k_values: list[int] = Field(
+        default_factory=lambda: [5, 10, 20],
+        description="Recall@K 的 K 值列表",
+    )
     skip_reranker: bool = Field(default=False, description="跳过 Reranker 精排")
     include_generation_eval: bool = Field(default=False, description="是否包含生成质量评估")
     sample_size: int | None = Field(default=None, description="限制评估样本数")
     # 标识
     prompt_version: str = Field(default="default", description="Prompt 版本标记")
     tags: list[str] = Field(default_factory=list, description="任务标签")
+    gate_scope: str | None = Field(
+        default=None,
+        min_length=1,
+        description="完成后自动执行指定 scope 的质量门禁",
+    )
 
 
 class EvalCompareRequest(BaseModel):
     baseline_job_id: str
     current_job_id: str
+
+
+class EvalBaselineCreateRequest(BaseModel):
+    job_id: str
+    name: str = Field(min_length=1, max_length=100)
+    scope: str = Field(default="default", min_length=1, max_length=100)
+    policy: dict | None = None
+    activate: bool = True
+
+
+class EvalGateRequest(BaseModel):
+    current_job_id: str
+    baseline_id: str | None = None
+    scope: str = Field(default="default", min_length=1, max_length=100)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -58,20 +85,14 @@ async def eval_submit(req: EvalSubmitRequest):
     """提交评估任务——异步执行，返回 job_id 用于查询进度。"""
     mgr = get_job_manager()
 
-    job = await mgr.submit({
-        "queries_count": len(req.queries) if req.queries else 0,
-        "testset_path": req.testset_path,
-        "model_name": req.model_name,
-        "k_values": req.k_values,
-        "skip_reranker": req.skip_reranker,
-        "include_generation_eval": req.include_generation_eval,
-        "prompt_version": req.prompt_version,
-        "tags": req.tags,
-    })
+    job = await mgr.submit(req.model_dump())
 
-    # 启动后台任务
-    params = req
-    asyncio.create_task(_run_eval_job(job.job_id, params))
+    task = asyncio.create_task(
+        _run_eval_job(job.job_id, req),
+        context=Context(),
+    )
+    _eval_tasks.add(task)
+    task.add_done_callback(_eval_tasks.discard)
 
     return {"job_id": job.job_id, "status": "pending"}
 
@@ -80,7 +101,7 @@ async def eval_submit(req: EvalSubmitRequest):
 async def eval_status(job_id: str):
     """查询评估任务进度——轮询此端点获取实时状态。"""
     mgr = get_job_manager()
-    job = mgr.get(job_id)
+    job = await mgr.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"任务不存在: {job_id}")
     return job.to_dict()
@@ -90,7 +111,7 @@ async def eval_status(job_id: str):
 async def eval_report(job_id: str, format: str = "json"):
     """获取评估报告——任务完成后返回完整报告。"""
     mgr = get_job_manager()
-    job = mgr.get(job_id)
+    job = await mgr.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail=f"任务不存在: {job_id}")
     if job.status == JobStatus.PENDING:
@@ -101,8 +122,8 @@ async def eval_report(job_id: str, format: str = "json"):
             "progress": job.progress,
             "message": "任务仍在执行中，请等待完成后再获取报告",
         }
-    if job.status == JobStatus.FAILED:
-        return {"status": "failed", "error": job.error}
+    if job.status in {JobStatus.FAILED, JobStatus.INTERRUPTED}:
+        return {"status": job.status.value, "error": job.error}
 
     if format == "md":
         md = render_result_markdown(_dict_to_evalresult(job.result), title="评估报告")
@@ -128,15 +149,83 @@ async def eval_report(job_id: str, format: str = "json"):
 async def eval_list_jobs(limit: int = 20):
     """列出历史评估任务。"""
     mgr = get_job_manager()
-    return {"jobs": mgr.list_jobs(limit)}
+    return {"jobs": await mgr.list_jobs(limit)}
+
+
+@router.post("/baselines")
+async def eval_create_baseline(req: EvalBaselineCreateRequest):
+    """从已完成评估任务创建不可变基线快照。"""
+    try:
+        baseline = await asyncio.to_thread(
+            QualityGateService().create_baseline,
+            job_id=req.job_id,
+            name=req.name,
+            scope=req.scope,
+            policy=GatePolicy.from_dict(req.policy),
+            activate=req.activate,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except IntegrityError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail="同一 scope 下已存在同名基线",
+        ) from exc
+    return {"baseline": baseline}
+
+
+@router.get("/baselines")
+async def eval_list_baselines(scope: str | None = None, limit: int = 50):
+    """列出评估基线。"""
+    from agentkb.storage.pg_database import get_db
+    rows = await asyncio.to_thread(get_db().list_eval_baselines, scope, limit)
+    return {"baselines": rows}
+
+
+@router.post("/baselines/{baseline_id}/activate")
+async def eval_activate_baseline(baseline_id: str):
+    """切换指定 scope 的激活基线。"""
+    from agentkb.storage.pg_database import get_db
+    baseline = await asyncio.to_thread(
+        get_db().activate_eval_baseline,
+        baseline_id,
+    )
+    if not baseline:
+        raise HTTPException(status_code=404, detail="评估基线不存在")
+    return {"baseline": baseline}
+
+
+@router.post("/gates")
+async def eval_run_gate(req: EvalGateRequest):
+    """对已完成任务执行质量门禁。"""
+    try:
+        gate = await asyncio.to_thread(
+            QualityGateService().run_gate,
+            current_job_id=req.current_job_id,
+            baseline_id=req.baseline_id,
+            scope=req.scope,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"gate": gate}
+
+
+@router.get("/gates")
+async def eval_list_gates(limit: int = 50):
+    """列出最近的质量门禁执行记录。"""
+    from agentkb.storage.pg_database import get_db
+    rows = await asyncio.to_thread(get_db().list_eval_gate_runs, limit)
+    return {"gates": rows}
 
 
 @router.post("/compare")
 async def eval_compare(req: EvalCompareRequest):
     """对比两次评估任务的结果。"""
     mgr = get_job_manager()
-    baseline_job = mgr.get(req.baseline_job_id)
-    current_job = mgr.get(req.current_job_id)
+    baseline_job, current_job = await asyncio.gather(
+        mgr.get(req.baseline_job_id),
+        mgr.get(req.current_job_id),
+    )
 
     if not baseline_job or not current_job:
         raise HTTPException(status_code=404, detail="任务不存在")
@@ -190,14 +279,21 @@ async def _run_eval_job(job_id: str, params: EvalSubmitRequest) -> None:
             testset.items = testset.items[:params.sample_size]
 
         total = len(testset.items)
-        mgr.update_progress(job_id, 5, f"测试集加载完成，共 {total} 条", total=total)
+        if total == 0:
+            raise ValueError("评估测试集不能为空")
+        await mgr.update_progress(
+            job_id,
+            5,
+            f"测试集加载完成，共 {total} 条",
+            total=total,
+        )
 
         # 2. 预热组件
         from agentkb.storage.pg_database import get_db
         from agentkb.knowledge.embedder import get_embedder
         get_db()
         get_embedder()
-        mgr.update_progress(job_id, 10, "组件预热完成", total=total)
+        await mgr.update_progress(job_id, 10, "组件预热完成", total=total)
 
         # 3. 逐条执行检索评估
         from agentkb.knowledge.retriever import get_retriever
@@ -215,8 +311,8 @@ async def _run_eval_job(job_id: str, params: EvalSubmitRequest) -> None:
         relevant_ids_per_query = []
         retrieved_ids_per_query = []
         per_query_timing = []
-        total_tokens = 0
-        total_tool_calls = 0
+        retrieval_elapsed_values: list[float] = []
+        retrieval_failures = 0
 
         for idx, item in enumerate(testset.items):
             queries.append(item.query)
@@ -246,18 +342,19 @@ async def _run_eval_job(job_id: str, params: EvalSubmitRequest) -> None:
                 else:
                     ret_ids = []
 
-                total_tool_calls += 1
             except Exception as e:
                 logger.error(f"检索失败 [{item.query}]: {e}")
                 ret_ids = []
+                retrieval_failures += 1
 
             elapsed = (time.time() - t0) * 1000
             retrieved_ids_per_query.append(ret_ids)
             per_query_timing.append({"query": item.query, "elapsed_ms": round(elapsed, 1), "candidate_count": len(ret_ids)})
+            retrieval_elapsed_values.append(elapsed)
 
             # 更新进度
             progress = 10 + (idx + 1) / total * 80
-            mgr.update_progress(
+            await mgr.update_progress(
                 job_id, progress,
                 message=f"评估中: {idx + 1}/{total}",
                 current_query=item.query[:60],
@@ -266,7 +363,13 @@ async def _run_eval_job(job_id: str, params: EvalSubmitRequest) -> None:
             )
 
         # 4. 计算指标
-        mgr.update_progress(job_id, 92, "计算评估指标…", completed=total, total=total)
+        await mgr.update_progress(
+            job_id,
+            92,
+            "计算评估指标…",
+            completed=total,
+            total=total,
+        )
 
         result = compute_metrics(
             queries=queries,
@@ -278,11 +381,23 @@ async def _run_eval_job(job_id: str, params: EvalSubmitRequest) -> None:
         # 5. 可选的生成质量评估
         generation_eval = None
         if params.include_generation_eval:
-            mgr.update_progress(job_id, 95, "执行生成质量评估…", completed=total, total=total)
+            await mgr.update_progress(
+                job_id,
+                95,
+                "执行生成质量评估…",
+                completed=total,
+                total=total,
+            )
+            generation_errors: list[str] = []
             try:
                 from agentkb.eval.generation_eval import GenerationEval
-                from agentkb.llm.factory import get_chat_model
-                llm = get_chat_model(streaming=True)
+                from agentkb.llm.factory import get_chat_model, get_chat_model_for
+
+                llm = (
+                    get_chat_model_for(params.model_name)
+                    if params.model_name
+                    else get_chat_model(streaming=False)
+                )
                 gen_eval = GenerationEval(llm_client=llm)
                 eval_items = []
                 for item in testset.items[:min(10, total)]:
@@ -298,18 +413,42 @@ async def _run_eval_job(job_id: str, params: EvalSubmitRequest) -> None:
                             "answer": resp.content if hasattr(resp, "content") else str(resp),
                             "contexts": contexts,
                         })
-                    except Exception:
-                        pass
-                gen_result = await gen_eval.evaluate_batch(eval_items)
-                generation_eval = gen_result.to_dict()
+                    except Exception as exc:
+                        generation_errors.append(
+                            f"{item.query[:60]}: {exc}"
+                        )
+                if eval_items:
+                    gen_result = await gen_eval.evaluate_batch(eval_items)
+                    generation_eval = {
+                        "status": "completed",
+                        **gen_result.to_dict(),
+                        "failed_samples": len(generation_errors),
+                        "errors": generation_errors[:20],
+                    }
+                else:
+                    generation_eval = {
+                        "status": "failed",
+                        "error": "没有可评估的生成样本",
+                        "errors": generation_errors[:20],
+                    }
             except Exception as e:
-                logger.warning(f"生成评估跳过: {e}")
+                logger.error(f"生成评估失败: {e}")
+                generation_eval = {
+                    "status": "failed",
+                    "error": str(e),
+                    "errors": generation_errors[:20],
+                }
 
         # 6. 组装结果
-        mgr.update_progress(job_id, 99, "生成报告…", completed=total, total=total)
+        await mgr.update_progress(
+            job_id,
+            99,
+            "生成报告…",
+            completed=total,
+            total=total,
+        )
 
-        # 工具调用准确率（简化：以 Recall@5 > 0 作为工具调用"有效"）
-        tool_accuracy = sum(
+        retrieval_hit_rate = sum(
             1 for q in result.per_query if q.recall_at_k.get(5, 0) > 0
         ) / len(result.per_query) if result.per_query else 0
 
@@ -320,11 +459,14 @@ async def _run_eval_job(job_id: str, params: EvalSubmitRequest) -> None:
                 "mrr": result.mrr,
                 "ndcg_at_k": {str(k): v for k, v in result.ndcg_at_k.items()},
                 # 扩展指标
-                "tool_call_accuracy": round(tool_accuracy, 4),
-                "tool_calls_total": total_tool_calls,
+                "retrieval_hit_rate_at_5": round(retrieval_hit_rate, 4),
+                "retrieval_failures": retrieval_failures,
                 "avg_latency_ms": round(
-                    sum(t["elapsed_ms"] for t in per_query_timing) / len(per_query_timing)
-                    if per_query_timing else 0, 1
+                    sum(retrieval_elapsed_values)
+                    / len(retrieval_elapsed_values)
+                    if retrieval_elapsed_values
+                    else 0,
+                    1,
                 ),
                 "total_queries": total,
             },
@@ -341,14 +483,27 @@ async def _run_eval_job(job_id: str, params: EvalSubmitRequest) -> None:
             "per_query_timing": per_query_timing,
             "generation_eval": generation_eval,
             "config": {
-                "model_name": params.model_name or cfg.llm_model_name,
+                "model_name": params.model_name or cfg.llm_generator_model_name,
                 "prompt_version": params.prompt_version,
                 "k_values": params.k_values,
                 "skip_reranker": params.skip_reranker,
+                "evaluation_signature": build_evaluation_signature(
+                    testset,
+                    params.k_values,
+                ),
             },
         }
 
     await mgr.start(job_id, _run)
+    if params.gate_scope:
+        try:
+            await asyncio.to_thread(
+                QualityGateService().run_gate,
+                current_job_id=job_id,
+                scope=params.gate_scope,
+            )
+        except ValueError as exc:
+            logger.error(f"评估任务 {job_id} 自动门禁失败: {exc}")
 
 
 def _dict_to_evalresult(data: dict | None) -> EvalResult:

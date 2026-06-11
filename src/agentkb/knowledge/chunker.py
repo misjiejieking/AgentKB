@@ -158,7 +158,7 @@ class ParentChildChunker(BaseChunker):
     def split(self, documents: list[Document]) -> list[Document]:
         parent_chunks = self._parent_splitter.split_documents(documents)
 
-        result = []
+        result: list[Document] = []
         for p_idx, parent in enumerate(parent_chunks):
             parent_content = parent.page_content
             parent_source = parent.metadata.get("source", "unknown")
@@ -249,7 +249,7 @@ class ChunkingStrategySelector:
             return ChunkingStrategy.SEMANTIC
 
         # 默认 — 滑动窗口
-        logger.info(f"策略选择: sliding_window（默认）")
+        logger.info("策略选择: sliding_window（默认）")
         return ChunkingStrategy.SLIDING_WINDOW
 
 

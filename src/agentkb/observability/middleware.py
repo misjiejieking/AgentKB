@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import time
-import uuid
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
@@ -27,45 +26,37 @@ class ObservabilityMiddleware(BaseHTTPMiddleware):
     """
 
     async def dispatch(self, request: Request, call_next) -> Response:
-        # 提取或生成 trace_id
-        trace_id = request.headers.get("X-Trace-ID", uuid.uuid4().hex[:16])
-        request.state.trace_id = trace_id
+        from agentkb.observability.metrics import get_metrics
+        from agentkb.observability.tracer import get_tracer
 
-        # 绑定到 loguru（通过 extra 字段，需配合 format 中的 {extra[trace_id]}）
-        logger.configure(extra={"trace_id": trace_id})
-
-        t0 = time.time()
-
-        # 开始请求 Span
-        try:
-            from agentkb.observability.tracer import get_tracer
-            tracer = get_tracer()
-            with tracer.start_trace(
-                session_id=request.headers.get("X-Session-ID", ""),
-                query=f"{request.method} {request.url.path}",
-            ) as trace:
-                # 将 trace_id 存到 request state 供下游使用
+        started_at = time.perf_counter()
+        tracer = get_tracer()
+        status_code = 500
+        with tracer.start_trace(
+            session_id=request.headers.get("X-Session-ID", ""),
+            query=f"{request.method} {request.url.path}",
+            trace_id=request.headers.get("X-Trace-ID"),
+        ) as trace:
+            with logger.contextualize(trace_id=trace.trace_id):
+                request.state.trace_id = trace.trace_id
                 request.state.trace = trace
+                try:
+                    response: Response = await call_next(request)
+                    status_code = response.status_code
+                except Exception as exc:
+                    trace.root_span.set_error(str(exc))
+                    raise
+                finally:
+                    elapsed_ms = (time.perf_counter() - started_at) * 1000
+                    route = request.scope.get("route")
+                    metric_path = getattr(route, "path", request.url.path)
+                    get_metrics().record_http_request(
+                        method=request.method,
+                        path=metric_path,
+                        status_code=status_code,
+                        elapsed_ms=elapsed_ms,
+                    )
 
-                response: Response = await call_next(request)
-
-                # 记录请求级别耗时
-                elapsed_ms = (time.time() - t0) * 1000
-                trace.total_elapsed_ms = elapsed_ms
-
-                # 注入响应头
-                response.headers["X-Trace-ID"] = trace_id
+                response.headers["X-Trace-ID"] = trace.trace_id
                 response.headers["X-Elapsed-Ms"] = f"{elapsed_ms:.1f}"
-
                 return response
-
-        except ImportError:
-            # 如果观测模块不可用，静默跳过
-            response = await call_next(request)
-            response.headers["X-Trace-ID"] = trace_id
-            return response
-        except Exception as exc:
-            logger.warning(f"观测中间件异常: {exc}")
-            response = await call_next(request)
-            response.headers["X-Trace-ID"] = trace_id
-            return response

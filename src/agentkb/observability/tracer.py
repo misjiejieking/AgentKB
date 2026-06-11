@@ -18,8 +18,9 @@ from __future__ import annotations
 import time
 import uuid
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any, Generator
+from typing import Any, Generator, TypeGuard
 
 from loguru import logger
 
@@ -32,7 +33,7 @@ from loguru import logger
 class SpanEvent:
     """Span 内的事件（不带独立 Span 开销的轻量埋点）。"""
     name: str
-    timestamp: str = ""
+    timestamp: float = 0.0
     attributes: dict[str, Any] = field(default_factory=dict)
     elapsed_ms: float = 0.0
 
@@ -44,8 +45,8 @@ class TraceSpan:
     parent_span_id: str = ""
     name: str = ""
     # 时间
-    start_time: str = ""
-    end_time: str = ""
+    start_time: float = 0.0
+    end_time: float = 0.0
     elapsed_ms: float = 0.0
     # 属性
     attributes: dict[str, Any] = field(default_factory=dict)
@@ -104,13 +105,18 @@ class Trace:
     # 所有 Span（含根）
     spans: list[TraceSpan] = field(default_factory=list)
     # 元数据
-    start_time: str = ""
-    end_time: str = ""
+    start_time: float = 0.0
+    end_time: float = 0.0
     total_elapsed_ms: float = 0.0
     # 统计
     total_tokens: int = 0
     total_tool_calls: int = 0
     tool_call_errors: int = 0
+
+    @property
+    def root_span(self) -> TraceSpan:
+        """返回当前 Trace 的根 Span。"""
+        return self.spans[0]
 
     def to_dict(self) -> dict:
         return {
@@ -135,6 +141,24 @@ class Trace:
 #  Trace 管理器
 # ══════════════════════════════════════════════════════════════
 
+_current_trace: ContextVar[Trace | None] = ContextVar(
+    "agentkb_current_trace",
+    default=None,
+)
+_current_span_stack: ContextVar[tuple[str, ...]] = ContextVar(
+    "agentkb_current_span_stack",
+    default=(),
+)
+
+
+def _is_trace_id(value: str | None) -> TypeGuard[str]:
+    return bool(
+        value
+        and len(value) == 16
+        and all(char in "0123456789abcdef" for char in value.lower())
+    )
+
+
 class TraceManager:
     """全局 Trace 管理器——创建/管理 Trace 生命周期，支持多导出器。
 
@@ -150,8 +174,6 @@ class TraceManager:
     """
 
     def __init__(self) -> None:
-        self._active_traces: dict[str, Trace] = {}
-        self._span_stack: dict[str, list[str]] = {}  # trace_id → [current_span_id]
         self._exporters: list = []  # 延迟初始化
 
     def _ensure_exporters(self) -> None:
@@ -161,10 +183,13 @@ class TraceManager:
 
     @contextmanager
     def start_trace(
-        self, session_id: str = "", query: str = ""
+        self,
+        session_id: str = "",
+        query: str = "",
+        trace_id: str | None = None,
     ) -> Generator[Trace, None, None]:
         """创建一个新 Trace 作为上下文管理器。"""
-        trace_id = uuid.uuid4().hex[:16]
+        trace_id = trace_id.lower() if _is_trace_id(trace_id) else uuid.uuid4().hex[:16]
         root_span_id = uuid.uuid4().hex[:8]
 
         trace = Trace(
@@ -183,8 +208,8 @@ class TraceManager:
             attributes={"session_id": session_id, "query": query[:200]},
         )
         trace.spans.append(root_span)
-        self._active_traces[trace_id] = trace
-        self._span_stack[trace_id] = [root_span_id]
+        trace_token = _current_trace.set(trace)
+        stack_token = _current_span_stack.set((root_span_id,))
 
         try:
             yield trace
@@ -207,15 +232,14 @@ class TraceManager:
                 except Exception as e:
                     logger.warning(f"Trace 导出到 {exporter.name} 失败: {e}")
 
-            self._active_traces.pop(trace_id, None)
-            self._span_stack.pop(trace_id, None)
+            _current_span_stack.reset(stack_token)
+            _current_trace.reset(trace_token)
 
     @contextmanager
     def span(self, name: str, attributes: dict | None = None) -> Generator[TraceSpan, None, None]:
         """在当前活跃 Trace 中创建一个子 Span。"""
-        # 找到当前活跃的 trace（使用最近创建的）
-        trace_id = list(self._active_traces.keys())[-1] if self._active_traces else ""
-        if not trace_id:
+        trace = _current_trace.get()
+        if trace is None:
             # 无活跃 trace，创建一个孤立 span
             span = TraceSpan(span_id=uuid.uuid4().hex[:8], name=name, start_time=time.time())
             if attributes:
@@ -227,8 +251,8 @@ class TraceManager:
                 span.elapsed_ms = (span.end_time - span.start_time) * 1000
             return
 
-        trace = self._active_traces[trace_id]
-        parent_id = self._span_stack.get(trace_id, [""])[-1] if self._span_stack.get(trace_id) else ""
+        stack = _current_span_stack.get()
+        parent_id = stack[-1] if stack else ""
 
         span = TraceSpan(
             span_id=uuid.uuid4().hex[:8],
@@ -240,7 +264,7 @@ class TraceManager:
             span.attributes.update(attributes)
 
         trace.spans.append(span)
-        self._span_stack.setdefault(trace_id, []).append(span.span_id)
+        stack_token = _current_span_stack.set((*stack, span.span_id))
 
         try:
             yield span
@@ -250,26 +274,11 @@ class TraceManager:
         finally:
             span.end_time = time.time()
             span.elapsed_ms = (span.end_time - span.start_time) * 1000
-            # 弹出栈
-            stack = self._span_stack.get(trace_id, [])
-            if stack and stack[-1] == span.span_id:
-                stack.pop()
+            _current_span_stack.reset(stack_token)
 
     def get_active_trace(self) -> Trace | None:
-        """获取当前活跃的 Trace（最新的）。"""
-        keys = list(self._active_traces.keys())
-        return self._active_traces[keys[-1]] if keys else None
-
-    def add_metric(self, name: str, value: float, tags: dict | None = None) -> None:
-        """直接记录一个指标（会导出到 Prometheus 等）。"""
-        self._ensure_exporters()
-        for exporter in self._exporters:
-            if hasattr(exporter, "record_metric"):
-                try:
-                    exporter.record_metric(name, value, tags or {})
-                except Exception:
-                    pass
-
+        """获取当前异步任务绑定的 Trace。"""
+        return _current_trace.get()
 
 # 模块级单例
 _tracer: TraceManager | None = None
@@ -289,3 +298,13 @@ def trace_context(session_id: str = "", query: str = "") -> Generator[Trace, Non
     tracer = get_tracer()
     with tracer.start_trace(session_id=session_id, query=query) as trace:
         yield trace
+
+
+def load_trace(trace_id: str) -> dict[str, Any] | None:
+    """从 PostgreSQL 读取指定 Trace。"""
+    if not _is_trace_id(trace_id):
+        return None
+
+    from agentkb.storage.pg_database import get_db
+
+    return get_db().get_trace(trace_id.lower())

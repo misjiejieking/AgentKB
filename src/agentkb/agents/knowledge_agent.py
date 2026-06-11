@@ -52,8 +52,13 @@ class KnowledgeAgent(SpecialistAgent):
             from agentkb.knowledge.retriever import get_retriever
             retriever = get_retriever()
             candidates = retriever.retrieve(task)
+            graph = (
+                db.search_knowledge_graph(task)
+                if cfg.knowledge_graph_enabled and self._is_graph_question(task)
+                else {"nodes": [], "edges": []}
+            )
 
-            if not candidates:
+            if not candidates and not graph["edges"]:
                 # 无结果时列出可用文件，帮助用户了解知识库范围
                 files = db.list_knowledge_files()
                 if files:
@@ -88,6 +93,12 @@ class KnowledgeAgent(SpecialistAgent):
             # 上下文组装
             contexts = []
             sources = set()
+            for edge in graph["edges"]:
+                contexts.append(
+                    f"{edge['source']} --{edge['predicate']}--> {edge['target']}\n"
+                    f"证据：{edge['evidence']}"
+                )
+                sources.add(edge["filename"])
             for c in candidates[:cfg.retrieval_final_k]:
                 content = c.get("parent_content") or c.get("content", "")
                 meta = c.get("chunk_metadata", {})
@@ -127,6 +138,7 @@ class KnowledgeAgent(SpecialistAgent):
                 output=output,
                 data={
                     "candidates_count": len(candidates),
+                    "graph_relations": len(graph["edges"]),
                     "sources": list(sources),
                     "top_score": candidates[0].get("rrf_score", 0) if candidates else 0,
                 },
@@ -158,6 +170,15 @@ class KnowledgeAgent(SpecialistAgent):
         ]
         return any(p in q for p in meta_patterns)
 
+    @staticmethod
+    def _is_graph_question(task: str) -> bool:
+        """识别需要实体关系推理的问题。"""
+        patterns = [
+            "关系", "关联", "依赖", "属于", "负责", "组成",
+            "连接", "调用", "上下游", "包含", "隶属",
+        ]
+        return any(pattern in task for pattern in patterns)
+
     async def _list_files(self, db, task: str, t0: float) -> AgentResult:
         """列出知识库中的所有文件及其统计信息。"""
         files = db.list_knowledge_files()
@@ -180,7 +201,7 @@ class KnowledgeAgent(SpecialistAgent):
         # 统计
         total_chunks = sum(f.get("chunk_count", 0) for f in files)
         total_size = sum(f.get("file_size", 0) for f in files)
-        type_counts = {}
+        type_counts: dict[str, int] = {}
         for f in files:
             ft = f.get("file_type", "unknown")
             type_counts[ft] = type_counts.get(ft, 0) + 1

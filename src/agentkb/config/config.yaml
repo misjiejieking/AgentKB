@@ -1,10 +1,7 @@
 app:
   auto_open_browser: true
-  debug: false
   host: 127.0.0.1
-  name: Knowledge Agent
   port: 8000
-  version: 0.2.0
 chunking:
   child_size: 256
   parent_size: 1024
@@ -14,14 +11,11 @@ chunking:
 embedding:
   batch_size: 32
   device: auto
-  dimension: 1024
   model_name: BAAI/bge-m3
   normalize: true
 eval:
   generation_sample_size: 50
-  judge_model: deepseek-chat
   questions_per_chunk: 2
-  report_dir: data/eval/reports
   retrieval_k_values:
   - 5
   - 10
@@ -36,27 +30,56 @@ knowledge:
   - .docx
   - .csv
   - .json
-langgraph:
-  checkpointer_db: data/checkpoints.db
-  max_recursion_limit: 10
+  - .png
+  - .jpg
+  - .jpeg
+  - .webp
+knowledge_graph:
+  enabled: true
+  max_chunks_per_file: 80
+  min_chunk_chars: 80
 llm:
   provider: ollama
-  model_name: qwen2.5:7b
-  router_model_name: qwen2.5:7b
-  generator_model_name: qwen2.5:7b
-  base_url: http://localhost:11434
-  api_key: ""
+  providers:
+    ollama:
+      protocol: ollama
+      base_url: http://localhost:11434
+      api_key: ""
+      router_model_name: qwen2.5:7b
+      generator_model_name: qwen2.5:7b
+    deepseek:
+      protocol: openai
+      base_url: https://api.deepseek.com/v1
+      api_key: ""
+      router_model_name: deepseek-chat
+      generator_model_name: deepseek-chat
+    openai:
+      protocol: openai
+      base_url: https://api.openai.com/v1
+      api_key: ""
+      router_model_name: gpt-4.1-mini
+      generator_model_name: gpt-4.1
   max_tokens: 4096
-  openai_api_key: ''
-  openai_base_url: ''
   request_timeout: 120
-  streaming: true
   temperature: 0.1
+multimodal:
+  vision:
+    enabled: true
+    provider: ollama
+    model_name: qwen2.5vl:7b
+    max_image_size_mb: 10
+    pdf_visual_analysis: false
+    pdf_max_pages: 12
+  transcription:
+    enabled: false
+    base_url: http://127.0.0.1:8001/v1
+    model_name: whisper-1
+    api_key: ""
+    max_audio_size_mb: 25
 logging:
   console: true
   file: data/logs/agentkb.log
   level: INFO
-  log_tool_calls: true
   retention: 7 days
   rotation: 10 MB
 postgresql:
@@ -70,35 +93,24 @@ postgresql:
 reranker:
   provider: "local"
   model_name: "D:/ai-models/BAAI/bge-reranker-v2-m3"
+  base_url: "https://dashscope.aliyuncs.com/api/v1/services/rerank/text-rerank/text-rerank"
+  api_key: ""
+  timeout: 30
 retrieval:
   bm25_weight: 0.4
   candidate_k: 30
   dense_weight: 0.6
   final_k: 5
   rrf_k: 60
-mcp:
-  enabled: false
-  servers: []
-
-# ── V2 新增 ─────────────────────────────────────────────────
-
-# 多 Agent 配置
-agents:
-  supervisor_model: "deepseek-chat"
-  specialist_model: "deepseek-chat"
-  max_decomposition_depth: 3
-  reflection_enabled: true
-  reflection_rounds: 2
-
 # 可观测性
 observability:
   enabled: true
   exporters:
     - console
     - file
+    - postgresql
     # - langfuse
     # - langsmith
-    # - prometheus
   langfuse:
     public_key: ""
     secret_key: ""
@@ -106,8 +118,6 @@ observability:
   langsmith:
     api_key: ""
     project: "agentkb"
-  prometheus:
-    port: 9090
 
 # 记忆系统
 memory:
@@ -115,10 +125,11 @@ memory:
   long_term_enabled: true
   long_term_min_importance: 0.6
 
-# ────────────────────────────────────────────────────────────
+# MCP 服务配置通过管理界面持久化；密钥值使用 ${ENV_VAR} 引用。
+mcp:
+  enabled: true
 
 web_search:
   enabled: true
-  engine: duckduckgo
   max_results: 5
   timeout: 10

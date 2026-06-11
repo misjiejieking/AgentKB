@@ -5,11 +5,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import ipaddress
 import re
+import socket
+from typing import Any
+from urllib.parse import urljoin, urlparse
 
 import httpx
 from pydantic import BaseModel, Field
-from loguru import logger
 
 from agentkb.tools.base import BaseTool, ToolResult
 
@@ -21,6 +25,9 @@ class BrowseInput(BaseModel):
 
 class WebBrowserTool(BaseTool):
     """网页浏览工具——获取网页全文并提取正文。"""
+
+    _MAX_REDIRECTS = 5
+    _MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 
     def __init__(self, timeout: int = 15) -> None:
         self._timeout = timeout
@@ -41,7 +48,12 @@ class WebBrowserTool(BaseTool):
     def args_schema(self) -> type[BaseModel]:
         return BrowseInput
 
-    async def _execute(self, url: str, extract_mode: str = "text") -> ToolResult:
+    async def _execute(
+        self,
+        url: str = "",
+        extract_mode: str = "text",
+        **kwargs: Any,
+    ) -> ToolResult:
         if not url.startswith(("http://", "https://")):
             url = "https://" + url
 
@@ -53,20 +65,71 @@ class WebBrowserTool(BaseTool):
         }
 
         try:
-            async with httpx.AsyncClient(timeout=self._timeout, follow_redirects=True) as client:
-                resp = await client.get(url, headers=headers)
-                if resp.status_code != 200:
+            async with httpx.AsyncClient(
+                timeout=self._timeout,
+                follow_redirects=False,
+            ) as client:
+                current_url = url
+                html = ""
+                for _ in range(self._MAX_REDIRECTS + 1):
+                    await self._validate_public_url(current_url)
+                    async with client.stream(
+                        "GET",
+                        current_url,
+                        headers=headers,
+                    ) as resp:
+                        if resp.is_redirect:
+                            location = resp.headers.get("location")
+                            if not location:
+                                return ToolResult(
+                                    tool_name=self.name,
+                                    success=False,
+                                    error="网页重定向缺少 Location",
+                                )
+                            current_url = urljoin(current_url, location)
+                            continue
+
+                        if resp.status_code != 200:
+                            return ToolResult(
+                                tool_name=self.name,
+                                success=False,
+                                error=f"HTTP {resp.status_code}: 无法访问该网页",
+                            )
+
+                        content = bytearray()
+                        async for chunk in resp.aiter_bytes():
+                            content.extend(chunk)
+                            if len(content) > self._MAX_RESPONSE_BYTES:
+                                return ToolResult(
+                                    tool_name=self.name,
+                                    success=False,
+                                    error="网页响应体超过 2MB 限制",
+                                )
+                        encoding = resp.encoding or "utf-8"
+                        html = bytes(content).decode(encoding, errors="replace")
+                        break
+                else:
                     return ToolResult(
-                        tool_name=self.name, success=False,
-                        error=f"HTTP {resp.status_code}: 无法访问该网页",
+                        tool_name=self.name,
+                        success=False,
+                        error=f"网页重定向超过 {self._MAX_REDIRECTS} 次",
                     )
 
-                html = resp.text
+                if not html:
+                    return ToolResult(
+                        tool_name=self.name,
+                        success=False,
+                        error="网页响应内容为空",
+                    )
 
                 if extract_mode == "html":
                     return ToolResult(
                         tool_name=self.name, success=True,
-                        data={"url": url, "html": html[:8192], "length": len(html)},
+                        data={
+                            "url": current_url,
+                            "html": html[:8192],
+                            "length": len(html),
+                        },
                     )
 
                 # 提取正文
@@ -74,7 +137,7 @@ class WebBrowserTool(BaseTool):
                 return ToolResult(
                     tool_name=self.name, success=True,
                     data={
-                        "url": url,
+                        "url": current_url,
                         "title": self._extract_title(html),
                         "text": text[:4096],
                         "text_length": len(text),
@@ -91,6 +154,39 @@ class WebBrowserTool(BaseTool):
                 tool_name=self.name, success=False,
                 error=f"浏览失败: {e}",
             )
+
+    @staticmethod
+    async def _validate_public_url(url: str) -> None:
+        """拒绝凭据、私网、环回、链路本地和保留地址。"""
+        parsed = urlparse(url)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            raise ValueError("仅允许访问有效的 HTTP/HTTPS URL")
+        if parsed.username or parsed.password:
+            raise ValueError("URL 不允许包含用户名或密码")
+        if parsed.port not in {None, 80, 443}:
+            raise ValueError("仅允许访问 80 或 443 端口")
+        if parsed.hostname.lower() == "localhost":
+            raise ValueError("不允许访问本机或私有网络地址")
+
+        try:
+            addresses = [ipaddress.ip_address(parsed.hostname)]
+        except ValueError:
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            records = await asyncio.to_thread(
+                socket.getaddrinfo,
+                parsed.hostname,
+                port,
+                type=socket.SOCK_STREAM,
+            )
+            addresses = list(
+                {
+                    ipaddress.ip_address(record[4][0])
+                    for record in records
+                }
+            )
+
+        if not addresses or any(not address.is_global for address in addresses):
+            raise ValueError("不允许访问本机或私有网络地址")
 
     @staticmethod
     def _extract_title(html: str) -> str:

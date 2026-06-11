@@ -13,6 +13,10 @@
   # 对比两次评估
   python -m agentkb.eval compare --baseline baseline.json --current after.json
 
+  # 创建版本化质量基线并执行门禁
+  python -m agentkb.eval baseline --input latest_eval.json --output baseline.json
+  python -m agentkb.eval run --gate-baseline baseline.json
+
   # 生成报告
   python -m agentkb.eval report --input eval_result.json --format md
 """
@@ -62,7 +66,7 @@ def cmd_generate(args) -> None:
     if check["valid"]:
         logger.info("测试集验证通过 ✅")
     else:
-        logger.warning(f"测试集验证发现问题:\n" + "\n".join(f"  - {i}" for i in check["issues"]))
+        logger.warning("测试集验证发现问题:\n" + "\n".join(f"  - {i}" for i in check["issues"]))
 
 
 def cmd_run(args) -> None:
@@ -115,41 +119,67 @@ def cmd_run(args) -> None:
     report_path.write_text(md, encoding="utf-8")
     logger.info(f"Markdown 报告: {report_path}")
 
-    # diff-baseline 对比模式：Recall@5 退化超过 2% 则 exit 1
-    if args.diff_baseline:
-        import json
-        from agentkb.eval.metrics import EvalResult
-        baseline_path = Path(args.diff_baseline)
-        if not baseline_path.exists():
-            logger.error(f"基线文件不存在: {baseline_path}")
-            return
-        baseline_data = json.loads(baseline_path.read_text(encoding="utf-8"))
-        bm = baseline_data.get("metrics", {})
-        baseline = EvalResult(
-            k_values=[int(k) for k in bm["recall_at_k"].keys()],
-            recall_at_k={int(k): v for k, v in bm["recall_at_k"].items()},
-            precision_at_k={int(k): v for k, v in bm.get("precision_at_k", {}).items()},
-            mrr=bm.get("mrr", 0),
-            ndcg_at_k={int(k): v for k, v in bm.get("ndcg_at_k", {}).items()},
-        )
+    if args.gate_baseline:
+        _run_file_gate(Path(args.gate_baseline), output)
 
-        from agentkb.eval.evaluator import Evaluator
-        diff = Evaluator.diff(baseline, result, args.diff_baseline, "current")
 
-        recall5_diff = next((d for d in diff.diffs if d.name == "Recall@5"), None)
-        if recall5_diff and recall5_diff.delta < -0.02:
-            logger.error(
-                f"Recall@5 退化 {abs(recall5_diff.delta):.3f} 超过阈值 0.02，CI 失败。"
-                f" 基线: {recall5_diff.baseline:.4f} → 当前: {recall5_diff.current:.4f}"
-            )
-            import sys
-            sys.exit(1)
+def cmd_baseline(args) -> None:
+    """从评估结果创建版本化质量基线。"""
+    import json
+    from datetime import datetime, timezone
 
-        md = render_diff_markdown(diff)
-        diff_path = output.with_suffix(".diff.md")
-        diff_path.write_text(md, encoding="utf-8")
-        logger.info(f"对比报告: {diff_path}")
-        logger.info("Recall@5 退化在阈值内，通过 ✅")
+    from agentkb.eval.quality_gate import GatePolicy
+
+    source = Path(args.input)
+    data = json.loads(source.read_text(encoding="utf-8"))
+    metrics = data.get("metrics")
+    if not isinstance(metrics, dict):
+        raise ValueError(f"评估结果缺少 metrics: {source}")
+
+    baseline = {
+        "version": 1,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "source": str(source),
+        "metrics": metrics,
+        "policy": GatePolicy().to_dict(),
+    }
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        json.dumps(baseline, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    logger.info(f"质量基线已创建: {output}")
+
+
+def _run_file_gate(baseline_path: Path, current_path: Path) -> None:
+    """执行文件型门禁，供本地和 CI 使用。"""
+    import json
+    import sys
+
+    from agentkb.eval.quality_gate import GatePolicy, evaluate_quality_gate
+
+    if not baseline_path.is_file():
+        raise FileNotFoundError(f"质量基线不存在: {baseline_path}")
+    baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+    current = json.loads(current_path.read_text(encoding="utf-8"))
+    gate = evaluate_quality_gate(
+        baseline.get("metrics", {}),
+        current.get("metrics", {}),
+        GatePolicy.from_dict(baseline.get("policy")),
+    )
+    gate_path = current_path.with_suffix(".gate.json")
+    gate_path.write_text(
+        json.dumps(gate, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    if not gate["passed"]:
+        for check in gate["checks"]:
+            if not check["passed"]:
+                logger.error(f"{check['metric']}: {check['reason']}")
+        logger.error(f"质量门禁失败，报告: {gate_path}")
+        sys.exit(1)
+    logger.info(f"质量门禁通过，报告: {gate_path}")
 
 
 def cmd_compare(args) -> None:
@@ -310,8 +340,19 @@ def main() -> None:
     p_run.add_argument("--testset", type=str, default=None, help="测试集路径")
     p_run.add_argument("--skip-reranker", action="store_true", help="跳过 reranker（用于对比）")
     p_run.add_argument("--output", type=str, default=None, help="输出路径")
-    p_run.add_argument("--diff-baseline", type=str, default=None, help="基线 JSON，对比后 Recall@5 退化超过 2%% 则 exit 1")
+    p_run.add_argument(
+        "--gate-baseline",
+        type=str,
+        default=None,
+        help="质量基线 JSON，任一规则失败则返回非零退出码",
+    )
     p_run.set_defaults(func=cmd_run)
+
+    # baseline
+    p_baseline = sub.add_parser("baseline", help="从评估结果创建版本化质量基线")
+    p_baseline.add_argument("--input", type=str, required=True, help="评估结果 JSON")
+    p_baseline.add_argument("--output", type=str, required=True, help="基线输出路径")
+    p_baseline.set_defaults(func=cmd_baseline)
 
     # compare
     p_cmp = sub.add_parser("compare", help="对比两次评估结果")

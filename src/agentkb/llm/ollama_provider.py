@@ -37,7 +37,7 @@ class OllamaProvider(LLMProvider):
             base_url=self._base_url,
             temperature=self._temperature,
             num_predict=self._max_tokens,
-            timeout=self._request_timeout,
+            client_kwargs={"timeout": self._request_timeout},
         )
 
     def validate_connection(self) -> bool:

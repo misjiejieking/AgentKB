@@ -1,4 +1,4 @@
-"""Trace 导出器——支持 Console、File、LangFuse、LangSmith、Prometheus。
+"""Trace 导出器——支持 Console、File、PostgreSQL、LangFuse、LangSmith。
 
 导出器采用可插拔设计，在 config.yaml 中配置即可启用。
 每个导出器实现 export_trace(trace_dict) 接口。
@@ -11,8 +11,6 @@ import os
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any
-
 from loguru import logger
 
 from agentkb.config.settings import Settings
@@ -32,11 +30,6 @@ class TraceExporter(ABC):
         """导出一条完整的 Trace 数据。"""
         ...
 
-    def record_metric(self, metric_name: str, value: float, tags: dict) -> None:
-        """记录指标（Prometheus 导出器实现此方法）。"""
-        pass
-
-
 # ══════════════════════════════════════════════════════════════
 #  Console 导出器 —— 开发环境使用
 # ══════════════════════════════════════════════════════════════
@@ -55,7 +48,8 @@ class ConsoleExporter(TraceExporter):
         # 构建 Span 树形输出
         lines = [
             f"\n{'='*60}",
-            f"Trace: {trace_data['trace_id']}  ({summary.get('total_elapsed_ms', 0):.0f}ms)",
+            f"Trace: {trace_data['trace_id']}  "
+            f"({trace_data.get('total_elapsed_ms', 0):.0f}ms)",
             f"Query: {trace_data.get('query', '')[:80]}",
             f"{'='*60}",
         ]
@@ -110,6 +104,19 @@ class FileExporter(TraceExporter):
             encoding="utf-8",
         )
         logger.debug(f"Trace 已写入: {filepath}")
+
+
+class PostgreSQLExporter(TraceExporter):
+    """将 Trace 写入统一 PostgreSQL 存储。"""
+
+    @property
+    def name(self) -> str:
+        return "postgresql"
+
+    def export_trace(self, trace_data: dict) -> None:
+        from agentkb.storage.pg_database import get_db
+
+        get_db().save_trace(trace_data)
 
 
 # ══════════════════════════════════════════════════════════════
@@ -255,110 +262,6 @@ class LangSmithExporter(TraceExporter):
 
 
 # ══════════════════════════════════════════════════════════════
-#  Prometheus 导出器 —— 指标聚合
-# ══════════════════════════════════════════════════════════════
-
-class PrometheusExporter(TraceExporter):
-    """Prometheus 指标导出器——聚合指标供 Prometheus 抓取。
-
-    在内存中维护 Counter/Histogram，暴露 /metrics 端点。
-    不依赖 prometheus_client 库——纯内存实现，避免引入新依赖。
-    如果安装了 prometheus_client，则使用官方库。
-    """
-
-    def __init__(self) -> None:
-        self._metrics: dict[str, list[tuple[float, dict, float]]] = {}  # name → [(value, tags, timestamp)]
-        self._use_official = False
-        try:
-            import prometheus_client  # noqa: F401
-            self._use_official = True
-            logger.info("Prometheus 导出器已启用（官方客户端）")
-        except ImportError:
-            logger.info("Prometheus 导出器已启用（内置实现）")
-
-    @property
-    def name(self) -> str:
-        return "prometheus"
-
-    def export_trace(self, trace_data: dict) -> None:
-        """从 Trace 中提取指标聚合。"""
-        summary = trace_data.get("summary", {})
-        ts = time.time()
-        tags = {"session_id": trace_data.get("session_id", "")}
-
-        self._record("agentkb_request_duration_ms",
-                     trace_data.get("total_elapsed_ms", 0), tags, ts)
-        self._record("agentkb_request_tokens_total",
-                     summary.get("total_tokens", 0), tags, ts)
-        self._record("agentkb_tool_calls_total",
-                     summary.get("total_tool_calls", 0), tags, ts)
-        self._record("agentkb_tool_errors_total",
-                     summary.get("tool_call_errors", 0), tags, ts)
-
-        # Span 级别耗时
-        for span in trace_data.get("spans", []):
-            if span.get("elapsed_ms"):
-                self._record(
-                    f"agentkb_span_duration_ms",
-                    span["elapsed_ms"],
-                    {"span": span["name"], **tags},
-                    ts,
-                )
-
-    def record_metric(self, metric_name: str, value: float, tags: dict) -> None:
-        """外部调用的指标记录入口。"""
-        self._record(metric_name, value, tags, time.time())
-
-    def _record(self, name: str, value: float, tags: dict, ts: float) -> None:
-        if self._use_official:
-            # 使用 prometheus_client 库
-            self._record_official(name, value, tags)
-        else:
-            self._metrics.setdefault(name, []).append((value, tags, ts))
-            # 只保留最近 10000 条
-            if len(self._metrics[name]) > 10000:
-                self._metrics[name] = self._metrics[name][-5000:]
-
-    # Prometheus 文本格式输出 —— 供 /metrics 端点使用
-    def render_metrics(self) -> str:
-        """以 Prometheus text format 输出当前指标快照。"""
-        if self._use_official:
-            import prometheus_client
-            return prometheus_client.generate_latest().decode("utf-8")
-
-        lines = []
-        for name, entries in self._metrics.items():
-            safe_name = name.replace("-", "_").replace(" ", "_")
-            lines.append(f"# HELP {safe_name} AgentKB metric")
-            lines.append(f"# TYPE {safe_name} gauge")
-            for value, tags, ts in entries[-100:]:
-                tag_str = ",".join(f'{k}="{v}"' for k, v in tags.items())
-                tag_suffix = f"{{{tag_str}}}" if tag_str else ""
-                lines.append(f"{safe_name}{tag_suffix} {value}")
-        return "\n".join(lines) + "\n"
-
-    def _record_official(self, name: str, value: float, tags: dict) -> None:
-        """使用官方 prometheus_client 库记录。"""
-        try:
-            import prometheus_client as pc
-            safe_name = "agentkb_" + name.replace("-", "_").replace(" ", "_")
-            if safe_name not in _official_metrics:
-                _official_metrics[safe_name] = pc.Gauge(
-                    safe_name, "AgentKB metric", list(tags.keys()),
-                )
-            gauge = _official_metrics[safe_name]
-            if tags:
-                gauge.labels(**tags).set(value)
-            else:
-                gauge.set(value)
-        except Exception:
-            pass
-
-
-_official_metrics: dict[str, Any] = {}
-
-
-# ══════════════════════════════════════════════════════════════
 #  导出器注册
 # ══════════════════════════════════════════════════════════════
 
@@ -370,9 +273,9 @@ def get_exporters() -> list[TraceExporter]:
     exporter_map: dict[str, type[TraceExporter]] = {
         "console": ConsoleExporter,
         "file": FileExporter,
+        "postgresql": PostgreSQLExporter,
         "langfuse": LangFuseExporter,
         "langsmith": LangSmithExporter,
-        "prometheus": PrometheusExporter,
     }
 
     exporters = []

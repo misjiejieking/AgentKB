@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 import re
+import time
+from typing import Any, Generator
 
 from pydantic import BaseModel, Field
 from loguru import logger
@@ -12,19 +16,29 @@ from agentkb.tools.base import BaseTool, ToolResult
 from agentkb.knowledge.retriever import get_retriever
 from agentkb.knowledge.cache import get_cache
 
-# 模块级对话历史缓存——按 session_id 隔离，agent_node 更新，knowledge_search 消费
-_chat_histories: dict[str, list[str]] = {}
-_current_session_id: str = "default"
+_chat_history: ContextVar[tuple[str, ...]] = ContextVar(
+    "knowledge_search_chat_history",
+    default=(),
+)
 
 
-def update_chat_history(messages: list, session_id: str = "default") -> None:
-    """更新指定会话的对话历史（由 agent_node 调用）。"""
-    global _chat_histories, _current_session_id
-    _chat_histories[session_id] = [
+@contextmanager
+def chat_history_context(messages: list) -> Generator[None, None, None]:
+    """为当前工具调用绑定会话历史，并发任务之间互不共享。"""
+    history = tuple(
         (m.content if hasattr(m, "content") else str(m))[:256]
         for m in messages[-6:]
-    ]
-    _current_session_id = session_id
+    )
+    token = _chat_history.set(history)
+    try:
+        yield
+    finally:
+        _chat_history.reset(token)
+
+
+def get_chat_history() -> list[str]:
+    """返回当前工具调用可见的会话历史。"""
+    return list(_chat_history.get())
 
 
 class KnowledgeSearchInput(BaseModel):
@@ -53,7 +67,7 @@ class KnowledgeSearchTool(BaseTool):
     def args_schema(self) -> type[BaseModel]:
         return KnowledgeSearchInput
 
-    async def _execute(self, query: str) -> ToolResult:
+    async def _execute(self, query: str = "", **kwargs: Any) -> ToolResult:
         from agentkb.agent.query_rewriter import rewrite_query
         from agentkb.llm.factory import get_chat_model
 
@@ -65,7 +79,9 @@ class KnowledgeSearchTool(BaseTool):
         try:
             llm = get_chat_model(streaming=True)
             rewritten = await rewrite_query(
-                query, _chat_histories.get(_current_session_id, []), llm
+                query,
+                get_chat_history(),
+                llm,
             )
             search_query = rewritten.get("rewritten", query)
             logger.debug(f"查询重写: {query[:60]} → {search_query[:60]}")
@@ -79,6 +95,9 @@ class KnowledgeSearchTool(BaseTool):
         cache_embedding = embedder.embed_query(search_query)
         cached_results = cache.get(cache_embedding)
         if cached_results:
+            from agentkb.observability.metrics import get_metrics
+
+            get_metrics().record_cache(True)
             return ToolResult(
                 tool_name=self.name,
                 success=True,
@@ -89,9 +108,18 @@ class KnowledgeSearchTool(BaseTool):
                     "cached": True,
                 },
             )
+        from agentkb.observability.metrics import get_metrics
+
+        get_metrics().record_cache(False)
 
         # 1. 混合检索 → 候选集
-        candidates = retriever.retrieve(search_query)
+        retrieval_started_at = time.perf_counter()
+        try:
+            candidates = retriever.retrieve(search_query)
+        finally:
+            get_metrics().record_retrieval(
+                (time.perf_counter() - retrieval_started_at) * 1000,
+            )
 
         if not candidates:
             return ToolResult(

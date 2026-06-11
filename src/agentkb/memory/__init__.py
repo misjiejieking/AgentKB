@@ -1,6 +1,10 @@
-"""增强记忆层——工作记忆 + 长期记忆 + Reflection 机制。"""
+"""会话上下文压缩与跨会话长期记忆。"""
 
-from agentkb.memory.working import WorkingMemory
+from agentkb.memory.context import SessionSummaryService, select_conversation_context
 from agentkb.memory.long_term import LongTermMemory
 
-__all__ = ["WorkingMemory", "LongTermMemory"]
+__all__ = [
+    "LongTermMemory",
+    "SessionSummaryService",
+    "select_conversation_context",
+]

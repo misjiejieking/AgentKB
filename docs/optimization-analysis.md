@@ -1,5 +1,7 @@
 # AgentKB 项目深度优化分析报告
 
+> 历史审查资料：内容描述的是 2026-05-23 当时状态，不代表当前代码。当前架构与能力以 `README.md` 和 `docs/architecture-v2.md` 为准。
+>
 > 审查日期：2026-05-23
 > 审查范围：全部核心模块（graph / nodes / retriever / reranker / chunker / pg_database / evaluator / tools / ui / api）
 > 视角：系统架构师 + 产品经理 双重视角
@@ -354,10 +356,11 @@
 
 ### 4.3 【中长期】插件/MCP 工具生态
 
-**现状**：PRD 已规划 MCP 支持但未实现。当前只有 2 个硬编码工具。
+**现状**：已实现 MCP Client，支持 stdio、Streamable HTTP、动态工具发现、
+PostgreSQL 持久化、工具级启停和人工确认策略。后续重点转向认证扩展、资源协议与生产级连接治理。
 
 **建议**：
-- 实现 MCP Client，支持用户自行接入第三方工具（邮件、日历、数据库查询等）
+- 扩展 MCP Resources、Prompts 与 OAuth 授权，完善远程企业服务接入
 - 构建 "工具市场" 概念：用户可以安装、启用、配置社区工具
 - 初期支持 3～5 个高频工具：邮件搜索、GitHub Issue 查询、本地文件搜索
 
@@ -393,7 +396,7 @@
 | 编号 | 优化项 | 难度 | 收益 |
 |------|--------|------|------|
 | L1 | Multi-Agent 编排（Router + Generator） | 高 | 延迟↓40% + 质量↑ |
-| L2 | MCP 工具生态 MVP | 高 | 平台价值跃升 |
+| L2 | MCP 工具生态 MVP | 已完成 | 支持双传输、动态发现与权限治理 |
 | L3 | 知识库健康度仪表板 | 中 | 用户留存 |
 | L4 | CI/CD 评估自动跑 | 中 | 工程成熟度 |
 | L5 | Web UI 替代 Gradio 调研/POC | 高 | 产品化基础 |

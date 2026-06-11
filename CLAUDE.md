@@ -10,12 +10,13 @@ AgentKB is a local-first Personal Knowledge Agent. Users upload notes (.md/.txt/
 
 | Module | Technology |
 |--------|------------|
-| Agent orchestration | LangGraph + 自研 Multi-Agent Orchestrator |
-| LLM | DeepSeek API（deepseek-chat，OpenAI 兼容协议） |
+| Agent orchestration | LangGraph StateGraph + Supervisor 依赖 DAG |
+| LLM | Ollama / DeepSeek / OpenAI 及其他 OpenAI 兼容 API |
 | Web framework | FastAPI + uvicorn |
 | Database | PostgreSQL + pgvector (HNSW index) |
 | Embedding | BGE-M3 (via sentence-transformers) |
 | BM25 | PostgreSQL tsvector + jieba 分词 |
+| Knowledge graph | PostgreSQL 实体/关系/证据表 + LLM 结构化抽取 |
 | Reranker | BGE-Reranker (本地 CrossEncoder，可切换百炼 API) |
 | Web search | DuckDuckGo (DDG Lite HTML 回退) |
 | Frontend | 原生 HTML/CSS/JS (static/) |
@@ -26,7 +27,7 @@ AgentKB is a local-first Personal Knowledge Agent. Users upload notes (.md/.txt/
 ### V2 Multi-Agent 架构
 
 ```
-用户 → static/ → FastAPI → Multi-Agent Orchestrator
+用户 → static/ → FastAPI → Multi-Agent Graph
                               ├── Supervisor (任务分解 + Agent 路由 + 结果聚合)
                               ├── KnowledgeAgent (知识检索与问答)
                               ├── ContentCreator (规划→写作→优化)
@@ -36,7 +37,7 @@ AgentKB is a local-first Personal Knowledge Agent. Users upload notes (.md/.txt/
                                     ↓
                               Tool Layer (检索/搜索/代码/浏览/日历)
                                     ↓
-                              Memory (Working + LongTerm)
+                              Memory (会话摘要 + LongTerm)
                                     ↓
                               PostgreSQL + pgvector
                                     ↓
@@ -46,12 +47,12 @@ AgentKB is a local-first Personal Knowledge Agent. Users upload notes (.md/.txt/
 **请求流程**：
 1. `ObservabilityMiddleware` 注入 trace_id
 2. `SupervisorAgent.analyze()` → 意图分析 + 任务分解
-3. `MultiAgentOrchestrator._execute_subtasks()` → 按依赖拓扑执行
+3. `MultiAgentGraph` → 按依赖拓扑并发执行
 4. 每个 Specialist Agent 独立执行，通过共享 context 传递中间结果
 5. `ReflectionModule.critique()` → 自检 + 可选的自动修订
-6. Trace 自动导出到 Console/File/LangFuse/LangSmith/Prometheus
+6. Trace 自动导出到 Console/File/PostgreSQL/LangFuse/LangSmith
 
-### 原有单 Agent 模式（兼容保留）
+### 单 Agent 模式
 
 ```
 用户 → static/ (HTML/CSS/JS) → FastAPI (/api/*) → LangGraph Agent → Tools
@@ -76,16 +77,21 @@ Query → 查询重写(指代消解) → 语义缓存检查 → HybridRetriever
 → Reranker 精排(当前 skip，用 RRF 分数排序) → 上下文截断(60% LLM 窗口预算)
 ```
 
+**知识图谱链路**：文件分块入库后进入持久化索引状态机，使用
+`with_structured_output` 抽取实体与关系，写入 PostgreSQL；服务重启会恢复
+`queued/processing` 文件，关系查询始终返回文件和原文证据。
+
 **分块策略**：上传时自动分析文档特征（标题密度、段落长度方差、短行占比）→ 选择滑动窗口/语义/父子分块。
 
 ## Running
 
 ```bash
-# Prerequisites: PostgreSQL 16+ with pgvector, DeepSeek API Key
+# Prerequisites: PostgreSQL 16+ with pgvector
 psql -U postgres -c "CREATE DATABASE agentkb;"
 psql -U postgres -d agentkb -c "CREATE EXTENSION IF NOT EXISTS vector;"
-set DEEPSEEK_API_KEY=sk-your-key-here   # Windows
-export DEEPSEEK_API_KEY=sk-your-key-here  # macOS/Linux
+# 默认使用本地 Ollama；切换云端厂商时配置对应 API Key
+set AGENTKB_LLM_PROVIDER=deepseek
+set DEEPSEEK_API_KEY=sk-your-key-here
 
 # Install
 pip install -r requirements.txt
@@ -96,6 +102,13 @@ python -m agentkb.main
 ```
 
 App opens at http://127.0.0.1:8000 (SSE streaming + 断点续传 via Last-Event-ID).
+
+多模态配置位于 `multimodal`：视觉模型可使用与主 LLM 不同的 provider；
+PDF 深度视觉解析默认关闭，语音按钮仅在转写服务启用时显示。
+
+自定义 Agent 通过 `/api/agents/draft` 生成结构化草案，必须再调用
+`POST /api/agents` 确认创建。定义保存在 PostgreSQL，运行时热注册；
+需要人工确认的高风险工具禁止分配给自定义 Agent。
 
 ## Commands
 
@@ -112,14 +125,22 @@ curl http://127.0.0.1:8000/api/eval/{job_id}/status
 # 获取报告
 curl http://127.0.0.1:8000/api/eval/{job_id}/report
 
+# 创建激活基线并执行质量门禁
+curl -X POST http://127.0.0.1:8000/api/eval/baselines \
+  -d '{"job_id": "abc", "name": "retrieval-v1", "scope": "default"}'
+curl -X POST http://127.0.0.1:8000/api/eval/gates \
+  -d '{"current_job_id": "def", "scope": "default"}'
+
 # 对比两次评估
 curl -X POST http://127.0.0.1:8000/api/eval/compare \
   -d '{"baseline_job_id": "abc", "current_job_id": "def"}'
 
-# === 评估（CLI 方式，兼容保留）===
+# === 评估（CLI 方式）===
 PYTHONPATH="src" python -m agentkb.eval generate --sample-size 50
 PYTHONPATH="src" python -m agentkb.eval run
-PYTHONPATH="src" python -m agentkb.eval run --diff-baseline data/eval/baseline.json
+PYTHONPATH="src" python -m agentkb.eval baseline \
+  --input data/eval/latest_eval.json --output data/eval/baseline.json
+PYTHONPATH="src" python -m agentkb.eval run --gate-baseline data/eval/baseline.json
 
 # === 可观测性 ===
 curl http://127.0.0.1:8000/api/metrics    # Prometheus 指标
@@ -152,24 +173,25 @@ src/agentkb/
 ├── llm/
 │   ├── base.py           # LLMProvider ABC
 │   ├── ollama_provider.py
-│   └── factory.py        # create_llm / get_chat_model（模块级单例）
+│   ├── openai_compatible_provider.py
+│   └── factory.py        # 根据配置创建路由与生成模型
 ├── agents/                 # 【V2 新增】多 Agent 协作层
 │   ├── base.py             # SpecialistAgent 基类 + AgentResult
 │   ├── supervisor.py       # Supervisor 任务分解/路由/聚合
-│   ├── orchestrator.py     # Multi-Agent 编排器
 │   ├── registry.py         # Agent 注册表（插件化）
 │   ├── reflection.py       # Reflection/Self-Critique 自检
 │   ├── knowledge_agent.py  # 知识检索 Agent
 │   ├── content_creator.py  # 内容创作 Agent（规划→写作→优化）
 │   ├── task_manager.py     # 任务管理 Agent（拆解+跟踪）
 │   ├── learning_tutor.py   # 学习导师 Agent
-│   └── social_writer.py    # 社媒内容 Agent（多平台适配）
+│   ├── social_writer.py    # 社媒内容 Agent（多平台适配）
+│   └── memory_agent.py     # 跨会话个人记忆 Agent
 ├── memory/                 # 【V2 新增】增强记忆层
-│   ├── working.py          # 工作记忆（会话窗口+自动压缩）
+│   ├── context.py          # 会话窗口选择 + PostgreSQL 增量摘要
 │   └── long_term.py        # 长期记忆（向量化+语义检索）
 ├── observability/          # 【V2 新增】全链路可观测性
 │   ├── tracer.py           # Trace/Span 管理（OTel 兼容）
-│   ├── exporters.py        # 导出器（Console/File/LangFuse/LangSmith/Prometheus）
+│   ├── exporters.py        # Trace 导出器（Console/File/PostgreSQL/LangFuse/LangSmith）
 │   ├── metrics.py          # 指标收集器
 │   └── middleware.py       # FastAPI 中间件（trace_id 注入）
 ├── tools/
@@ -179,7 +201,7 @@ src/agentkb/
 │   ├── web_search.py     # DuckDuckGo + DDG Lite 回退
 │   ├── web_browser.py    # 【V2】网页浏览 + 正文提取
 │   ├── code_executor.py  # 【V2】安全沙箱代码执行
-│   └── mcp_client.py     # MCP 客户端（stdio 传输）
+│   └── personal_memory.py # 个人记忆搜索与显式保存
 ├── knowledge/
 │   ├── loader.py         # FileLoader：pymupdf/pdf + python-docx + 纯文本
 │   ├── chunker.py        # TextSplitter + 多策略分块（滑动窗口/语义/父子）+ 自动策略选择
@@ -188,13 +210,15 @@ src/agentkb/
 │   ├── reranker.py       # RerankerService（LocalCrossEncoder / BailianAPI）
 │   └── cache.py          # QueryCache：基于 embedding 余弦相似度的语义缓存
 ├── storage/
-│   ├── pg_database.py    # Database 单例：psycopg2 连接池 + 建表 + CRUD + pgvector 检索
-│   └── models.py         # Pydantic 数据模型 + ID/时间工具函数
+│   ├── pg_database.py    # Database 单例：连接池、CRUD、Run/Event 与 pgvector
+│   ├── migrations.py     # 带校验和的顺序迁移
+│   ├── checkpointer.py   # PostgreSQL LangGraph Checkpointer
+│   └── models.py         # ID 工具函数
 ├── session/
 │   └── manager.py        # SessionManager：会话 CRUD + LangChain 消息序列化
 ├── eval/
 │   ├── api.py             # 【V2】HTTP API（POST /eval/submit, GET /eval/{id}/status, GET /eval/{id}/report）
-│   ├── jobs.py            # 【V2】异步任务管理器（内存队列 + 并发控制 + 实时进度）
+│   ├── jobs.py            # 【V2】PostgreSQL 持久化任务管理器
 │   ├── cli.py             # CLI 入口（generate / run / compare / report / generation）
 │   ├── testset.py         # TestSet：银标测试集生成 + 加载/保存/验证 + from_queries
 │   ├── evaluator.py       # Evaluator：串联检索管线 + 指标计算 + 对比报告
@@ -203,24 +227,23 @@ src/agentkb/
 │   └── reporter.py       # Markdown 报告渲染
 └── utils/
     ├── logger.py         # Loguru 配置
-    ├── exceptions.py     # 异常层级
-    └── tracer.py         # 轻量级 Trace 记录器（记录 LLM/tool/retrieval 耗时）
+    └── exceptions.py     # 异常层级
 ```
 
 ## Key Patterns
 
-- **根目录 `main.py`** 是 PyCharm 生成的占位文件，不是入口。真正的入口是 `src/agentkb/main.py`
-- **`requirements.txt`** 是实际依赖（比 `pyproject.toml` 新）；`pyproject.toml` 依赖列表已过时
-- **Multi-Agent 模式**：`SupervisorAgent.analyze()` 做意图分类 + 任务分解，`MultiAgentOrchestrator` 按依赖拓扑执行 subtasks，默认启用 Reflection 自检
-- **单 Agent 兼容模式**：保留原有 LangGraph ReAct loop，`IntentRouter` 先用关键词快速匹配再走 LLM
-- **Router LLM 分离**：`router_model_name` 用于意图路由，`generator_model_name` 用于回复生成（默认都用 deepseek-chat）
-- **Checkpointer** 用的是 aiosqlite（与 LangGraph 的 AsyncSqliteSaver），独立于 PG 业务数据库
+- **应用入口**：`src/agentkb/main.py`
+- **依赖声明**：`pyproject.toml` 与 `requirements.txt` 保持同步
+- **Multi-Agent 模式**：`SupervisorAgent.analyze()` 做任务分解，`MultiAgentGraph` 按依赖拓扑并发执行 subtasks
+- **单 Agent 模式**：LangGraph ReAct loop，`IntentRouter` 先用关键词快速匹配再走 LLM
+- **LLM 配置**：`llm.provider` 选择厂商配置，路由模型与生成模型独立设置
+- **Checkpointer**：使用统一 PostgreSQL 连接池持久化，可恢复中断与人工审批状态
 - **Agent 注册表**：`AgentRegistry` 单例，插件化注册 Specialist Agent，按 intent 自动路由
 - **可观测性**：`ObservabilityMiddleware` 自动注入 trace_id，`TraceManager` 管理 Span 层级树，多导出器可插拔配置
-- **SSE 断点续传**：`SessionStream` 缓存事件（带自增 id），支持 Last-Event-ID 重连补发
-- **评估 HTTP API**：异步任务提交 → 实时进度轮询 → 完整 JSON 报告，支持多任务对比
+- **SSE 断点续传**：Run/Event 持久化事件并携带自增序号，支持 Last-Event-ID 重连补发
+- **评估 HTTP API**：任务和进度持久化到 PostgreSQL，支持报告与多任务对比
 - **语义缓存**：文件上传/删除时失效；用 embedding 余弦相似度 > 0.95 判定命中
-- **CI 评估门**：`.github/workflows/eval.yml` 在 PR 修改检索代码时自动跑评估，Recall@5 退化 >2% 则 fail
+- **CI 评估门**：`.github/workflows/eval.yml` 使用版本化基线执行 Recall、Precision、MRR、NDCG 多指标门禁
 
 ## AGENTS.md
 

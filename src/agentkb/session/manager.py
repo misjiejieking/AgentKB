@@ -13,15 +13,15 @@ from langchain_core.messages import (
 )
 from loguru import logger
 
-from agentkb.storage.pg_database import get_db
-from agentkb.storage.models import MessageRole, new_id, now_iso
+from agentkb.storage.pg_database import Database, get_db
+from agentkb.storage.models import new_id
 
 
 class SessionManager:
     """管理会话与消息的持久化，以及 LangChain 消息的序列化/反序列化。"""
 
-    def __init__(self, db_path: str | None = None) -> None:
-        self._db = get_db(db_path)
+    def __init__(self, db: Database | None = None) -> None:
+        self._db = db or get_db()
 
     # ── 会话 ───────────────────────────────────────────────────
 
@@ -66,18 +66,39 @@ class SessionManager:
     def load_messages(self, session_id: str) -> list[dict[str, Any]]:
         """从数据库加载会话的全部消息历史。"""
         rows = self._db.get_messages(session_id)
+        attachment_rows = self._db.get_session_attachments(session_id)
+        attachments_by_message: dict[str, list[dict[str, Any]]] = {}
+        for attachment in attachment_rows:
+            attachments_by_message.setdefault(
+                str(attachment["message_id"]),
+                [],
+            ).append({
+                "id": attachment["id"],
+                "name": attachment["original_name"],
+                "media_type": attachment["media_type"],
+                "status": attachment["status"],
+                "description": attachment["description"],
+            })
         messages = []
         for row in rows:
             msg = {
                 "role": row["role"],
                 "content": row["content"],
             }
+            attachments = attachments_by_message.get(str(row["id"]), [])
+            if attachments:
+                msg["attachments"] = attachments
             if row["tool_calls"]:
-                msg["tool_calls"] = json.loads(row["tool_calls"])
+                msg["tool_calls"] = self._decode_jsonb(row["tool_calls"])
             if row["tool_results"]:
-                msg["tool_results"] = json.loads(row["tool_results"])
+                msg["tool_results"] = self._decode_jsonb(row["tool_results"])
             messages.append(msg)
         return messages
+
+    @staticmethod
+    def _decode_jsonb(value: Any) -> Any:
+        """JSONB 驱动结果可能是原生对象，也可能是序列化字符串。"""
+        return json.loads(value) if isinstance(value, str) else value
 
     # ── LangChain 消息序列化 ───────────────────────────────────
 
@@ -109,6 +130,16 @@ class SessionManager:
             role = m.get("role", "")
             content = m.get("content", "")
             if role in ("user", "human"):
+                descriptions = [
+                    attachment.get("description", "").strip()
+                    for attachment in m.get("attachments", [])
+                    if attachment.get("description", "").strip()
+                ]
+                if descriptions:
+                    content = (
+                        f"{content}\n\n[历史图片附件分析]\n"
+                        + "\n\n".join(descriptions)
+                    ).strip()
                 lc_messages.append(HumanMessage(content=content))
             elif role in ("assistant", "ai"):
                 ai_msg = AIMessage(content=content)

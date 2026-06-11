@@ -1,5 +1,7 @@
 # 个人知识助手 Agent（Knowledge Agent）PRD
 
+> 历史 MVP 产品文档：技术选型和实施状态不代表当前代码，当前状态以 `README.md` 为准。
+>
 > 产品需求文档（完整版）
 
 ---

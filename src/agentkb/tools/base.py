@@ -61,6 +61,16 @@ class BaseTool(ABC):
         """可选：Pydantic 模型，定义工具参数 schema。"""
         return None
 
+    @property
+    def requires_confirmation(self) -> bool:
+        """高风险工具必须在执行前获得服务端审批。"""
+        return False
+
+    @property
+    def confirmation_message(self) -> str:
+        """返回审批界面展示的风险说明。"""
+        return f"工具 {self.name} 将执行可能修改外部状态的操作，必须由你确认。"
+
     @abstractmethod
     async def _execute(self, **kwargs) -> ToolResult:
         """子类实现具体的工具逻辑。"""
@@ -85,6 +95,13 @@ class BaseTool(ABC):
         logger.info(
             f"工具 [{self.name}] 完成 — 成功={result.success}, "
             f"耗时={result.elapsed_ms:.0f}ms"
+        )
+        from agentkb.observability.metrics import get_metrics
+
+        get_metrics().record_tool_call(
+            self.name,
+            result.elapsed_ms,
+            result.success,
         )
         return result
 

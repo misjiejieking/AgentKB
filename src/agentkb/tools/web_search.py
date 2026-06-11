@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 from urllib.parse import quote_plus
 
 import httpx
@@ -41,14 +42,14 @@ class WebSearchTool(BaseTool):
     def args_schema(self) -> type[BaseModel]:
         return WebSearchInput
 
-    async def _execute(self, query: str) -> ToolResult:
+    async def _execute(self, query: str = "", **kwargs: Any) -> ToolResult:
         # 方案一：尝试 duckduckgo_search 库
         results = await self._search_with_lib(query)
         if results is not None:
             return self._format_results(query, results)
 
         # 方案二：回退到 DuckDuckGo Lite HTML 解析
-        logger.info(f"duckduckgo_search 库失败，回退到 DDG Lite HTML")
+        logger.info("duckduckgo_search 库失败，回退到 DDG Lite HTML")
         results = await self._search_with_lite(query)
         if results is not None:
             return self._format_results(query, results)

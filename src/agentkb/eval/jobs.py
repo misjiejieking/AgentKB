@@ -1,20 +1,14 @@
-"""评估异步任务管理器——提交、查询进度、获取报告。"""
+"""PostgreSQL 持久化评估任务管理器。"""
 
 from __future__ import annotations
 
 import asyncio
-import json
 import uuid
-import time
 from dataclasses import dataclass, field
-from datetime import datetime
 from enum import Enum
-from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from loguru import logger
-
-from agentkb.config.settings import Settings
 
 
 class JobStatus(str, Enum):
@@ -22,31 +16,47 @@ class JobStatus(str, Enum):
     RUNNING = "running"
     DONE = "done"
     FAILED = "failed"
+    INTERRUPTED = "interrupted"
 
 
 @dataclass
 class EvalJob:
-    """单个评估任务的完整状态。"""
+    """单个评估任务的持久化状态。"""
+
     job_id: str
     status: JobStatus = JobStatus.PENDING
-    progress: float = 0.0          # 0~100
+    progress: float = 0.0
     progress_message: str = ""
-    # 请求参数
-    params: dict = field(default_factory=dict)
-    # 结果
-    result: dict | None = None
+    params: dict[str, Any] = field(default_factory=dict)
+    result: dict[str, Any] | None = None
     error: str = ""
-    # 时间戳
     created_at: str = ""
     started_at: str = ""
     finished_at: str = ""
-    # 中间统计
     current_query: str = ""
     completed_queries: int = 0
     total_queries: int = 0
 
-    def to_dict(self) -> dict:
-        base = {
+    @classmethod
+    def from_row(cls, row: dict[str, Any]) -> EvalJob:
+        return cls(
+            job_id=str(row["id"]),
+            status=JobStatus(row["status"]),
+            progress=float(row["progress"]),
+            progress_message=str(row["progress_message"]),
+            params=dict(row["params"]),
+            result=dict(row["result"]) if row["result"] else None,
+            error=str(row["error"]),
+            created_at=_format_timestamp(row["created_at"]),
+            started_at=_format_timestamp(row["started_at"]),
+            finished_at=_format_timestamp(row["finished_at"]),
+            current_query=str(row["current_query"]),
+            completed_queries=int(row["completed_queries"]),
+            total_queries=int(row["total_queries"]),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        data = {
             "job_id": self.job_id,
             "status": self.status.value,
             "progress": round(self.progress, 1),
@@ -61,86 +71,92 @@ class EvalJob:
             "total_queries": self.total_queries,
         }
         if self.status == JobStatus.DONE and self.result:
-            base["metrics_summary"] = {
-                k: v for k, v in self.result.get("metrics", {}).items()
-                if k in ("recall_at_k", "mrr", "ndcg_at_k")
+            data["metrics_summary"] = {
+                key: value
+                for key, value in self.result.get("metrics", {}).items()
+                if key in ("recall_at_k", "mrr", "ndcg_at_k")
             }
-        return base
+        return data
+
+
+def _format_timestamp(value: Any) -> str:
+    if value is None:
+        return ""
+    return value.isoformat() if hasattr(value, "isoformat") else str(value)
 
 
 class EvalJobManager:
-    """评估任务管理器——内存存储 + 并发控制。"""
+    """通过 PostgreSQL 管理任务状态，仅在进程内保留并发信号量。"""
 
-    def __init__(self) -> None:
-        self._jobs: dict[str, EvalJob] = {}
-        self._lock = asyncio.Lock()
-        self._semaphore = asyncio.Semaphore(3)  # 最大并发评估任务数
+    def __init__(self, db=None, max_concurrency: int = 3) -> None:
+        self._db = db
+        self._semaphore = asyncio.Semaphore(max_concurrency)
 
-    async def submit(self, params: dict) -> EvalJob:
-        """提交评估任务，返回 job 对象。"""
-        job = EvalJob(
-            job_id=uuid.uuid4().hex[:12],
-            params=params,
-            created_at=datetime.now().isoformat(timespec="seconds"),
-        )
-        async with self._lock:
-            self._jobs[job.job_id] = job
-        logger.info(f"评估任务已提交: {job.job_id}, params={params}")
-        return job
+    @property
+    def db(self):
+        if self._db is None:
+            from agentkb.storage.pg_database import get_db
 
-    async def start(self, job_id: str, run_fn: Callable) -> None:
-        """异步启动评估任务。"""
-        job = self._jobs.get(job_id)
-        if not job:
-            return
+            self._db = get_db()
+        return self._db
 
-        job.status = JobStatus.RUNNING
-        job.started_at = datetime.now().isoformat(timespec="seconds")
+    async def submit(self, params: dict[str, Any]) -> EvalJob:
+        job_id = uuid.uuid4().hex[:12]
+        row = await asyncio.to_thread(self.db.create_eval_job, job_id, params)
+        logger.info(f"评估任务已提交: {job_id}")
+        return EvalJob.from_row(row)
 
+    async def start(
+        self,
+        job_id: str,
+        run_fn: Callable[[EvalJob], Awaitable[None]],
+    ) -> None:
         async with self._semaphore:
+            await asyncio.to_thread(self.db.start_eval_job, job_id)
+            job = await self.get(job_id)
+            if job is None or job.status != JobStatus.RUNNING:
+                return
+
             try:
                 await run_fn(job)
-                job.status = JobStatus.DONE
-                job.progress = 100
-                job.finished_at = datetime.now().isoformat(timespec="seconds")
+                await asyncio.to_thread(
+                    self.db.complete_eval_job,
+                    job_id,
+                    job.result or {},
+                )
                 logger.info(f"评估任务完成: {job_id}")
             except Exception as exc:
-                job.status = JobStatus.FAILED
-                job.error = str(exc)
-                job.finished_at = datetime.now().isoformat(timespec="seconds")
+                await asyncio.to_thread(self.db.fail_eval_job, job_id, str(exc))
                 logger.error(f"评估任务失败: {job_id}, error={exc}")
 
-    def get(self, job_id: str) -> EvalJob | None:
-        return self._jobs.get(job_id)
+    async def get(self, job_id: str) -> EvalJob | None:
+        row = await asyncio.to_thread(self.db.get_eval_job, job_id)
+        return EvalJob.from_row(row) if row else None
 
-    def list_jobs(self, limit: int = 20) -> list[dict]:
-        """返回最近的任务列表。"""
-        sorted_jobs = sorted(
-            self._jobs.values(),
-            key=lambda j: j.created_at,
-            reverse=True,
-        )
-        return [j.to_dict() for j in sorted_jobs[:limit]]
+    async def list_jobs(self, limit: int = 20) -> list[dict[str, Any]]:
+        rows = await asyncio.to_thread(self.db.list_eval_jobs, limit)
+        return [EvalJob.from_row(row).to_dict() for row in rows]
 
-    def update_progress(
-        self, job_id: str, progress: float, message: str = "",
-        current_query: str = "", completed: int = 0, total: int = 0,
+    async def update_progress(
+        self,
+        job_id: str,
+        progress: float,
+        message: str = "",
+        current_query: str | None = None,
+        completed: int | None = None,
+        total: int | None = None,
     ) -> None:
-        """更新任务进度（从 run_fn 回调）。"""
-        job = self._jobs.get(job_id)
-        if not job:
-            return
-        job.progress = min(progress, 99.9)
-        job.progress_message = message
-        if current_query:
-            job.current_query = current_query
-        if completed:
-            job.completed_queries = completed
-        if total:
-            job.total_queries = total
+        await asyncio.to_thread(
+            self.db.update_eval_job_progress,
+            job_id,
+            progress=progress,
+            message=message,
+            current_query=current_query,
+            completed=completed,
+            total=total,
+        )
 
 
-# 模块级单例
 _job_manager: EvalJobManager | None = None
 
 

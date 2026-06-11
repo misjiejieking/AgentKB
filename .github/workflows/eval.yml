@@ -5,30 +5,22 @@ on:
     paths:
       - 'src/agentkb/knowledge/**'
       - 'src/agentkb/tools/knowledge_search.py'
-      - 'src/agentkb/agent/**'
+      - 'src/agentkb/agents/**'
+      - 'src/agentkb/eval/**'
+      - 'data/eval/testset.json'
+      - 'data/eval/baseline.json'
   push:
     branches: [main]
     paths:
       - 'src/agentkb/knowledge/**'
       - 'src/agentkb/tools/knowledge_search.py'
+      - 'src/agentkb/agents/**'
+      - 'src/agentkb/eval/**'
 
 jobs:
   eval:
-    runs-on: ubuntu-latest
-    services:
-      postgres:
-        image: pgvector/pgvector:pg16
-        env:
-          POSTGRES_DB: agentkb
-          POSTGRES_USER: postgres
-          POSTGRES_PASSWORD: postgres
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
+    # 本地模型和评估语料不上传云端，门禁在具备完整评估环境的 Runner 执行。
+    runs-on: [self-hosted, agentkb-eval]
 
     steps:
       - uses: actions/checkout@v4
@@ -39,22 +31,13 @@ jobs:
           python-version: '3.11'
 
       - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-          pip install sentence-transformers
+        run: pip install -e .
 
-      - name: Generate testset (if missing)
-        run: |
-          if [ ! -f data/eval/testset.json ]; then
-            python -m agentkb.eval generate --sample-size 20 || echo "Testset generation skipped (needs LLM)"
-          fi
+      - name: Validate evaluation assets
+        run: python -c "from pathlib import Path; assert Path('data/eval/testset.json').is_file(); assert Path('data/eval/baseline.json').is_file()"
 
       - name: Run eval with baseline check
-        run: |
-          python -m agentkb.eval run --output data/eval/ci_eval.json --diff-baseline data/eval/baseline.json || {
-            echo "======= Regression detected ======="
-            exit 1
-          }
+        run: python -m agentkb.eval run --output data/eval/ci_eval.json --gate-baseline data/eval/baseline.json
 
       - name: Upload eval report
         if: always()
@@ -64,4 +47,4 @@ jobs:
           path: |
             data/eval/ci_eval.json
             data/eval/ci_eval.md
-            data/eval/ci_eval.diff.md
+            data/eval/ci_eval.gate.json

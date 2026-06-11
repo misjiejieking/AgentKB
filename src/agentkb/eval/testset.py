@@ -326,34 +326,33 @@ class TestSet:
         )
         return selected[:sample_size]
 
-    # ── LLM 客户端（用 httpx 直调 API，兼容 DeepSeek/Ollama） ──
+    # ── LLM 客户端 ─────────────────────────────────────────────
 
     @staticmethod
     def _create_llm_client() -> dict:
         """返回 LLM 调用配置。"""
-        import os
         from agentkb.config.settings import Settings
         cfg = Settings.load()
         return {
             "provider": cfg.llm_provider,
+            "protocol": cfg.llm_protocol,
             "base_url": cfg.llm_base_url.rstrip("/"),
-            "model": cfg.llm_model_name,
+            "model": cfg.llm_generator_model_name,
             "timeout": cfg.llm_request_timeout,
-            "api_key": os.getenv("DEEPSEEK_API_KEY", cfg._val("llm", "api_key", default="")),
+            "api_key": cfg.llm_api_key,
         }
 
     @staticmethod
     def _llm_generate(client: dict, prompt: str) -> str:
-        """调用 LLM API 生成文本——自动适配 DeepSeek / Ollama。"""
+        """按配置协议调用 LLM API 生成文本。"""
         import httpx
 
-        provider = client.get("provider", "ollama")
+        protocol = client["protocol"]
 
-        if provider == "deepseek":
-            # DeepSeek OpenAI 兼容 API
+        if protocol == "openai":
             try:
                 resp = httpx.post(
-                    f"{client['base_url']}/v1/chat/completions",
+                    f"{client['base_url']}/chat/completions",
                     json={
                         "model": client["model"],
                         "messages": [{"role": "user", "content": prompt}],
@@ -369,13 +368,20 @@ class TestSet:
                 if resp.status_code == 200:
                     body = resp.json()
                     return body["choices"][0]["message"]["content"]
-                logger.warning(f"DeepSeek API 返回 {resp.status_code}")
+                logger.warning(
+                    f"LLM Provider '{client['provider']}' 返回 {resp.status_code}"
+                )
                 return ""
             except Exception as e:
-                logger.warning(f"DeepSeek API 调用失败: {e}")
+                logger.warning(
+                    f"LLM Provider '{client['provider']}' 调用失败: {e}"
+                )
                 return ""
 
-        # Ollama 原生 API（兼容保留）
+        if protocol != "ollama":
+            logger.warning(f"不支持的 LLM 协议: {protocol}")
+            return ""
+
         try:
             resp = httpx.post(
                 f"{client['base_url']}/api/generate",

@@ -20,7 +20,15 @@ def _init_database() -> None:
     """初始化 PG 数据库（建表 + pgvector 扩展）。"""
     try:
         from agentkb.storage.pg_database import get_db
-        get_db()
+        db = get_db()
+        interrupted = db.interrupt_incomplete_runs()
+        if interrupted:
+            from loguru import logger
+            logger.warning(f"已终止 {interrupted} 个上次进程遗留的 Agent Run")
+        interrupted_evals = db.interrupt_incomplete_eval_jobs()
+        if interrupted_evals:
+            from loguru import logger
+            logger.warning(f"已终止 {interrupted_evals} 个上次进程遗留的评估任务")
     except Exception as e:
         from loguru import logger
         logger.error(f"PostgreSQL 连接失败: {e}")
@@ -32,18 +40,28 @@ def _register_tools(cfg: Settings) -> None:
     """注册所有工具到 ToolRegistry。"""
     from agentkb.tools.registry import ToolRegistry
     from agentkb.tools.knowledge_search import KnowledgeSearchTool
+    from agentkb.tools.knowledge_graph import KnowledgeGraphQueryTool
     from agentkb.tools.web_search import WebSearchTool
     from agentkb.tools.code_executor import CodeExecutorTool
+    from agentkb.tools.personal_memory import (
+        SavePersonalMemoryTool,
+        SearchPersonalMemoryTool,
+    )
     from agentkb.tools.web_browser import WebBrowserTool
 
     registry = ToolRegistry()
     registry.register(KnowledgeSearchTool())
-    registry.register(WebSearchTool(
-        max_results=cfg.web_search_max_results,
-        timeout=cfg.web_search_timeout,
-    ))
+    if cfg.knowledge_graph_enabled:
+        registry.register(KnowledgeGraphQueryTool())
+    if cfg.web_search_enabled:
+        registry.register(WebSearchTool(
+            max_results=cfg.web_search_max_results,
+            timeout=cfg.web_search_timeout,
+        ))
     registry.register(CodeExecutorTool())
     registry.register(WebBrowserTool())
+    registry.register(SearchPersonalMemoryTool())
+    registry.register(SavePersonalMemoryTool())
 
 
 def _register_agents() -> None:
@@ -53,6 +71,7 @@ def _register_agents() -> None:
     from agentkb.agents.content_creator import ContentCreatorAgent
     from agentkb.agents.task_manager import TaskManagerAgent
     from agentkb.agents.learning_tutor import LearningTutorAgent
+    from agentkb.agents.memory_agent import MemoryAgent
     from agentkb.agents.social_writer import SocialWriterAgent
 
     registry = get_agent_registry()
@@ -61,6 +80,7 @@ def _register_agents() -> None:
     registry.register(TaskManagerAgent())
     registry.register(LearningTutorAgent())
     registry.register(SocialWriterAgent())
+    registry.register(MemoryAgent())
 
 
 def _init_llm(cfg: Settings) -> None:
@@ -72,7 +92,9 @@ def _init_llm(cfg: Settings) -> None:
         provider.validate_connection()
     except Exception as e:
         logger.warning(f"LLM 连接检查失败: {e}")
-        logger.warning("请确保 DEEPSEEK_API_KEY 已设置或 Ollama 已启动")
+        logger.warning(
+            f"请检查 LLM Provider '{cfg.llm_provider}' 的地址、模型和密钥配置"
+        )
 
 
 def _init_embedder(cfg: Settings) -> None:
@@ -128,23 +150,31 @@ def main() -> None:
     # 5. 注册工具 + Agent
     _register_tools(cfg)
     _register_agents()
+    from agentkb.agents.custom_service import CustomAgentService
+    custom_agent_count = CustomAgentService().load_active()
     from agentkb.tools.registry import ToolRegistry
     from agentkb.agents.registry import get_agent_registry
     logger.info(f"已注册 {len(ToolRegistry().list_tools())} 个工具")
     logger.info(f"已注册 {len(get_agent_registry().list_all())} 个 Specialist Agent")
+    if custom_agent_count:
+        logger.info(f"已恢复 {custom_agent_count} 个自定义 Agent")
 
     # 6. 验证 LLM + 预热向量模型
     _init_llm(cfg)
     _init_embedder(cfg)
 
-    # 7. 构建 LangGraph 单 Agent 图（兼容模式）
+    # 7. 构建 LangGraph 单 Agent 图
     import asyncio
     from agentkb.agent.graph import AgentGraph
-    agent_graph = asyncio.run(AgentGraph.create())
+    from agentkb.storage.checkpointer import PostgresCheckpointSaver
+    from agentkb.storage.pg_database import get_db
+
+    checkpointer = PostgresCheckpointSaver(get_db())
+    agent_graph = asyncio.run(AgentGraph.create(checkpointer))
 
     # 8. 构建 LangGraph Multi-Agent 图
     from agentkb.agents.graph import MultiAgentGraph
-    multi_agent_graph = asyncio.run(MultiAgentGraph.create())
+    multi_agent_graph = asyncio.run(MultiAgentGraph.create(checkpointer))
 
     # 9. 构建 FastAPI 应用
     from agentkb.api.server import create_app
@@ -153,13 +183,16 @@ def main() -> None:
     # 10. 注册可观测性中间件
     _init_observability(api_app, cfg)
 
-    # 12. 启动 uvicorn
+    # 11. 启动 uvicorn
     import uvicorn
     if cfg.app_auto_open_browser:
         webbrowser.open(f"http://{cfg.app_host}:{cfg.app_port}")
 
     logger.info(f"AgentKB V2 启动于 http://{cfg.app_host}:{cfg.app_port}")
-    logger.info("可用端点: /api/chat/stream | /api/eval/* | /api/metrics | /api/health")
+    logger.info(
+        "可用端点: /api/chat/stream | /api/agents | /api/mcp/servers "
+        "| /api/eval/* | /api/metrics | /api/health"
+    )
     uvicorn.run(
         api_app,
         host=cfg.app_host,

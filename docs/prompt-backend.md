@@ -1,5 +1,7 @@
 # AgentKB 后端优化迭代 — Codex 开发提示词
 
+> 历史执行提示词：其中的任务与目标文件可能已被当前实现替代，不应作为现状说明。
+>
 > 本文档是给予 Codex（AI 开发助手）的后端优化指导提示词。
 > 完整上下文见 `docs/optimization-analysis.md`，请先阅读该文档后再执行以下任务。
 > 所有代码改动必须遵守仓库根目录 `AGENTS.md` 中的工程规范。
@@ -409,18 +411,18 @@
          - uses: actions/checkout@v4
          - name: Setup Python & deps
          - name: Run eval
-           run: python -m agentkb.eval --diff-baseline data/eval/baseline.json
+           run: python -m agentkb.eval run --gate-baseline data/eval/baseline.json
          - name: Check regression
            run: |
-             # Recall@5 退化超过 2% 则失败
+             # 任一质量规则不满足则失败
              ...
    ```
 
-2. 在 `eval/cli.py` 增加 `--diff-baseline` 选项：
+2. 在 `eval/cli.py` 增加 `--gate-baseline` 选项：
    - 加载基线 EvalResult
    - 运行当前评估
    - 生成 DiffReport
-   - Recall@5 退化 >2% 时 exit code 非 0
+   - 任一基线规则失败时 exit code 非 0
 
 **验收标准**:
 - PR 修改检索相关代码时自动触发评估

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import csv
 import json
-import shutil
 from abc import ABC, abstractmethod
 from io import StringIO
 from pathlib import Path
@@ -14,6 +13,8 @@ from langchain_core.documents import Document
 from loguru import logger
 
 from agentkb.utils.exceptions import KnowledgeBaseError
+from agentkb.config.settings import Settings
+from agentkb.multimodal.vision import VisionService
 
 
 class BaseFileLoader(ABC):
@@ -51,36 +52,95 @@ class MarkdownLoader(BaseFileLoader):
 
 
 class PdfLoader(BaseFileLoader):
-    """.pdf 加载器（PyMuPDF），逐页提取文本。"""
+    """.pdf 加载器，保留页面文本并可分析扫描页和图表。"""
+
+    def __init__(
+        self,
+        settings: Settings,
+        vision_service: VisionService | None = None,
+    ) -> None:
+        self.settings = settings
+        self.vision_service = vision_service
 
     @property
     def extensions(self) -> set[str]:
         return {".pdf"}
 
     def load(self, file_path: Path) -> list[Document]:
-        import fitz  # PyMuPDF
+        import fitz  # type: ignore[import-untyped]  # PyMuPDF 未提供类型声明
         docs = []
         try:
-            doc = fitz.open(str(file_path))
-            for page_num in range(len(doc)):
-                page = doc[page_num]
-                text = page.get_text()
-                if text.strip():
-                    docs.append(Document(
-                        page_content=text,
-                        metadata={
-                            "source": file_path.name,
-                            "page_number": page_num + 1,
-                            "total_pages": len(doc),
-                        },
-                    ))
-            doc.close()
+            with fitz.open(str(file_path)) as doc:
+                visual_pages = 0
+                for page_num, page in enumerate(doc):
+                    text = page.get_text().strip()
+                    visual_text = ""
+                    needs_visual = (
+                        self.settings.vision_pdf_visual_analysis
+                        and visual_pages < self.settings.vision_pdf_max_pages
+                        and (len(text) < 80 or bool(page.get_images(full=True)))
+                    )
+                    if needs_visual:
+                        pixmap = page.get_pixmap(
+                            matrix=fitz.Matrix(1.5, 1.5),
+                            alpha=False,
+                        )
+                        image = pixmap.tobytes("jpeg")
+                        service = self.vision_service or VisionService(
+                            settings=self.settings
+                        )
+                        analysis = service.analyze(
+                            image,
+                            prompt=(
+                                f"这是 PDF《{file_path.name}》第 {page_num + 1} 页。"
+                                "请提取页面文字，并解释图表、流程图、公式和版面关系；"
+                                "输出可独立检索的中文描述。"
+                            ),
+                        )
+                        visual_text = analysis.description
+                        visual_pages += 1
+
+                    page_content = "\n\n".join(
+                        part for part in (text, visual_text) if part
+                    )
+                    if page_content:
+                        docs.append(Document(
+                            page_content=page_content,
+                            metadata={
+                                "source": file_path.name,
+                                "page_number": page_num + 1,
+                                "total_pages": len(doc),
+                                "visual_analysis": bool(visual_text),
+                            },
+                        ))
         except Exception as e:
             raise KnowledgeBaseError(f"PDF 解析失败 '{file_path.name}': {e}") from e
 
         if not docs:
             raise KnowledgeBaseError(f"PDF 文件中无有效文本内容: {file_path.name}")
         return docs
+
+
+class ImageLoader(BaseFileLoader):
+    """图片知识加载器，将视觉内容转换为可检索文本。"""
+
+    def __init__(self, vision_service: VisionService) -> None:
+        self.vision_service = vision_service
+
+    @property
+    def extensions(self) -> set[str]:
+        return {".jpg", ".jpeg", ".png", ".webp"}
+
+    def load(self, file_path: Path) -> list[Document]:
+        analysis = self.vision_service.analyze(file_path.read_bytes())
+        return [Document(
+            page_content=analysis.description,
+            metadata={
+                "source": file_path.name,
+                "media_type": analysis.media_type,
+                "visual_analysis": True,
+            },
+        )]
 
 
 class DocxLoader(BaseFileLoader):
@@ -99,25 +159,21 @@ class DocxLoader(BaseFileLoader):
         except Exception as e:
             raise KnowledgeBaseError(f"DOCX 解析失败 '{file_path.name}': {e}") from e
 
-        paragraphs = []
+        paragraphs: list[tuple[str, bool]] = []
         for para in doc.paragraphs:
             text = para.text.strip()
             if not text:
                 continue
             is_heading = para.style and para.style.type == WD_STYLE_TYPE.PARAGRAPH and "heading" in (para.style.name or "").lower()
-            paragraphs.append({
-                "text": text,
-                "is_heading": is_heading,
-                "style": para.style.name if para.style else "",
-            })
+            paragraphs.append((text, bool(is_heading)))
 
         if not paragraphs:
             raise KnowledgeBaseError(f"DOCX 文件中无有效文本内容: {file_path.name}")
 
         # 整个文档作为一个 Document，段落结构保留到 metadata
         full_text = "\n\n".join(
-            (f"## {p['text']}" if p["is_heading"] else p["text"])
-            for p in paragraphs
+            (f"## {text}" if is_heading else text)
+            for text, is_heading in paragraphs
         )
         return [Document(
             page_content=full_text,
@@ -206,57 +262,26 @@ class JsonLoader(BaseFileLoader):
 # ══════════════════════════════════════════════════════════════
 
 class FileLoader:
-    """统一文件加载入口，按扩展名分发到对应 Loader。支持 .md/.txt/.pdf/.docx/.csv/.json，最大 10 MB。"""
+    """统一文件加载入口，按扩展名分发到对应 Loader。"""
 
-    MAX_FILE_SIZE_BYTES = 10 * 1024 * 1024
-
-    def __init__(self, upload_dir: str = "data/uploads") -> None:
-        self._upload_dir = Path(upload_dir)
-        self._upload_dir.mkdir(parents=True, exist_ok=True)
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        vision_service: VisionService | None = None,
+    ) -> None:
+        settings = settings or Settings.load()
+        vision_service = vision_service or VisionService(settings=settings)
         self._loaders: dict[str, BaseFileLoader] = {}
-        self._register_defaults()
-
-    def _register_defaults(self) -> None:
-        for loader_cls in [MarkdownLoader, PdfLoader, DocxLoader, CsvLoader, JsonLoader]:
-            loader = loader_cls()
+        for loader in (
+            MarkdownLoader(),
+            PdfLoader(settings, vision_service),
+            DocxLoader(),
+            CsvLoader(),
+            JsonLoader(),
+            ImageLoader(vision_service),
+        ):
             for ext in loader.extensions:
                 self._loaders[ext] = loader
-
-    def register_loader(self, loader: BaseFileLoader) -> None:
-        for ext in loader.extensions:
-            self._loaders[ext] = loader
-
-    @property
-    def supported_extensions(self) -> set[str]:
-        return set(self._loaders.keys())
-
-    # ── 校验与保存 ────────────────────────────────────────────
-
-    def validate(self, file_path: str | Path) -> Path:
-        path = Path(file_path)
-        if not path.exists():
-            raise KnowledgeBaseError(f"文件不存在: {file_path}")
-        ext = path.suffix.lower()
-        if ext not in self._loaders:
-            raise KnowledgeBaseError(
-                f"不支持的文件类型 '{ext}'。支持: {', '.join(sorted(self.supported_extensions))}"
-            )
-        if path.stat().st_size > self.MAX_FILE_SIZE_BYTES:
-            raise KnowledgeBaseError(
-                f"文件过大: {path.stat().st_size} 字节（上限 {self.MAX_FILE_SIZE_BYTES}）"
-            )
-        return path
-
-    def save(self, file_path: str | Path) -> Path:
-        src = self.validate(file_path)
-        dst = self._upload_dir / src.name
-        counter = 1
-        while dst.exists():
-            dst = self._upload_dir / f"{src.stem}_{counter}{src.suffix}"
-            counter += 1
-        shutil.copy2(src, dst)
-        logger.info(f"文件已保存: {src} → {dst}")
-        return dst
 
     # ── 加载 ──────────────────────────────────────────────────
 

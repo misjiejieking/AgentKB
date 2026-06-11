@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "created_at": "2026-06-10T00:00:00+08:00",
+  "source": "data/eval/latest_eval.json",
+  "metrics": {
+    "recall_at_k": {
+      "5": 0.8125,
+      "10": 0.925,
+      "20": 1.0
+    },
+    "precision_at_k": {
+      "5": 0.325,
+      "10": 0.185,
+      "20": 0.1
+    },
+    "mrr": 0.9646,
+    "ndcg_at_k": {
+      "5": 0.8058,
+      "10": 0.8499,
+      "20": 0.8737
+    }
+  },
+  "policy": {
+    "rules": [
+      {
+        "metric": "recall_at_k.5",
+        "direction": "higher",
+        "max_regression": 0.02,
+        "min_value": null,
+        "max_value": null
+      },
+      {
+        "metric": "precision_at_k.5",
+        "direction": "higher",
+        "max_regression": 0.02,
+        "min_value": null,
+        "max_value": null
+      },
+      {
+        "metric": "mrr",
+        "direction": "higher",
+        "max_regression": 0.02,
+        "min_value": null,
+        "max_value": null
+      },
+      {
+        "metric": "ndcg_at_k.5",
+        "direction": "higher",
+        "max_regression": 0.02,
+        "min_value": null,
+        "max_value": null
+      }
+    ]
+  }
+}

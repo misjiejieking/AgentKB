@@ -14,8 +14,8 @@ from pathlib import Path
 
 from loguru import logger
 
-from agentkb.eval.metrics import EvalResult, QueryMetrics
-from agentkb.eval.evaluator import DiffReport, MetricDiff
+from agentkb.eval.metrics import EvalResult
+from agentkb.eval.evaluator import DiffReport
 
 
 # ══════════════════════════════════════════════════════════════

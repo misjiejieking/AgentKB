@@ -84,10 +84,6 @@ class Settings:
         return self._val("app", "port")
 
     @property
-    def app_debug(self) -> bool:
-        return self._val("app", "debug")
-
-    @property
     def app_auto_open_browser(self) -> bool:
         return self._val("app", "auto_open_browser")
 
@@ -98,24 +94,59 @@ class Settings:
         return self._val("llm", "provider")
 
     @property
-    def llm_model_name(self) -> str:
-        return self._val("llm", "model_name")
+    def llm_protocol(self) -> str:
+        return self._llm_provider_val("protocol")
+
+    def _llm_provider_val(
+        self,
+        key: str,
+        default: Any = None,
+        provider: str | None = None,
+    ) -> Any:
+        return self._val(
+            "llm",
+            "providers",
+            provider or self.llm_provider,
+            key,
+            default=default,
+        )
+
+    def llm_provider_value(
+        self,
+        provider: str,
+        key: str,
+        default: Any = None,
+    ) -> Any:
+        """读取指定 LLM Provider 的配置值。"""
+        return self._llm_provider_val(key, default=default, provider=provider)
+
+    def llm_provider_api_key(self, provider: str) -> str:
+        """读取指定 Provider 的 API Key，环境变量优先。"""
+        provider_env = f"{provider.upper().replace('-', '_')}_API_KEY"
+        return os.getenv(
+            provider_env,
+            self._llm_provider_val("api_key", default="", provider=provider),
+        )
 
     @property
     def llm_router_model_name(self) -> str:
-        return self._val("llm", "router_model_name")
+        return self._llm_provider_val("router_model_name")
 
     @property
     def llm_generator_model_name(self) -> str:
-        return self._val("llm", "generator_model_name")
+        return self._llm_provider_val("generator_model_name")
 
     @property
     def llm_base_url(self) -> str:
-        return self._val("llm", "base_url")
+        return self._llm_provider_val("base_url")
 
     @property
     def llm_api_key(self) -> str:
-        return os.getenv("DEEPSEEK_API_KEY", self._val("llm", "api_key", default=""))
+        provider_env = f"{self.llm_provider.upper().replace('-', '_')}_API_KEY"
+        return os.getenv(
+            provider_env,
+            self._llm_provider_val("api_key", default=""),
+        )
 
     @property
     def llm_temperature(self) -> float:
@@ -128,18 +159,6 @@ class Settings:
     @property
     def llm_request_timeout(self) -> int:
         return self._val("llm", "request_timeout")
-
-    @property
-    def llm_streaming(self) -> bool:
-        return self._val("llm", "streaming")
-
-    @property
-    def openai_api_key(self) -> str:
-        return os.getenv("OPENAI_API_KEY", self._val("llm", "openai_api_key"))
-
-    @property
-    def openai_base_url(self) -> str:
-        return self._val("llm", "openai_base_url")
 
     # ── embedding ───────────────────────────────────────────────
 
@@ -159,10 +178,6 @@ class Settings:
     def embedding_batch_size(self) -> int:
         return self._val("embedding", "batch_size")
 
-    @property
-    def embedding_dimension(self) -> int:
-        return self._val("embedding", "dimension")
-
     # ── knowledge ───────────────────────────────────────────────
 
     @property
@@ -172,6 +187,69 @@ class Settings:
     @property
     def knowledge_max_file_size_mb(self) -> int:
         return self._val("knowledge", "max_file_size_mb")
+
+    # ── multimodal ──────────────────────────────────────────────
+
+    @property
+    def vision_enabled(self) -> bool:
+        return self._val("multimodal", "vision", "enabled")
+
+    @property
+    def vision_provider(self) -> str:
+        return self._val("multimodal", "vision", "provider")
+
+    @property
+    def vision_model_name(self) -> str:
+        return self._val("multimodal", "vision", "model_name")
+
+    @property
+    def vision_max_image_size_mb(self) -> int:
+        return self._val("multimodal", "vision", "max_image_size_mb")
+
+    @property
+    def vision_pdf_visual_analysis(self) -> bool:
+        return self._val("multimodal", "vision", "pdf_visual_analysis")
+
+    @property
+    def vision_pdf_max_pages(self) -> int:
+        return self._val("multimodal", "vision", "pdf_max_pages")
+
+    @property
+    def transcription_enabled(self) -> bool:
+        return self._val("multimodal", "transcription", "enabled")
+
+    @property
+    def transcription_base_url(self) -> str:
+        return self._val("multimodal", "transcription", "base_url")
+
+    @property
+    def transcription_model_name(self) -> str:
+        return self._val("multimodal", "transcription", "model_name")
+
+    @property
+    def transcription_api_key(self) -> str:
+        return os.getenv(
+            "TRANSCRIPTION_API_KEY",
+            self._val("multimodal", "transcription", "api_key"),
+        )
+
+    @property
+    def transcription_max_audio_size_mb(self) -> int:
+        return self._val("multimodal", "transcription", "max_audio_size_mb")
+
+    # ── knowledge graph ─────────────────────────────────────────
+
+    @property
+    def knowledge_graph_enabled(self) -> bool:
+        return self._val("knowledge_graph", "enabled")
+
+    @property
+    def knowledge_graph_max_chunks_per_file(self) -> int:
+        return self._val("knowledge_graph", "max_chunks_per_file")
+
+    @property
+    def knowledge_graph_min_chunk_chars(self) -> int:
+        return self._val("knowledge_graph", "min_chunk_chars")
 
     # ── postgresql ──────────────────────────────────────────────
 
@@ -269,21 +347,11 @@ class Settings:
     def chunking_sliding_overlap(self) -> int:
         return self._val("chunking", "sliding_overlap")
 
-    # ── database (postgresql) ───────────────────────────────────
-
-    @property
-    def database_type(self) -> str:
-        return self._val("database", "type", default=self.pg_dbname and "postgresql" or "sqlite")
-
     # ── eval ────────────────────────────────────────────────────
 
     @property
     def eval_testset_path(self) -> str:
         return self._val("eval", "testset_path")
-
-    @property
-    def eval_report_dir(self) -> str:
-        return self._val("eval", "report_dir")
 
     @property
     def eval_questions_per_chunk(self) -> int:
@@ -297,29 +365,11 @@ class Settings:
     def eval_retrieval_k_values(self) -> list[int]:
         return self._val("eval", "retrieval_k_values")
 
-    @property
-    def eval_judge_model(self) -> str:
-        return self._val("eval", "judge_model")
-
-    # ── mcp ─────────────────────────────────────────────────────
-
-    @property
-    def mcp_enabled(self) -> bool:
-        return self._val("mcp", "enabled")
-
-    @property
-    def mcp_servers(self) -> list[dict]:
-        return self._val("mcp", "servers", default=[])
-
     # ── web search ──────────────────────────────────────────────
 
     @property
     def web_search_enabled(self) -> bool:
         return self._val("web_search", "enabled")
-
-    @property
-    def web_search_engine(self) -> str:
-        return self._val("web_search", "engine")
 
     @property
     def web_search_max_results(self) -> int:
@@ -351,16 +401,22 @@ class Settings:
     def logging_console(self) -> bool:
         return self._val("logging", "console")
 
-    @property
-    def logging_log_tool_calls(self) -> bool:
-        return self._val("logging", "log_tool_calls")
-
-    # ── langgraph ───────────────────────────────────────────────
+    # ── memory ──────────────────────────────────────────────────
 
     @property
-    def langgraph_checkpointer_db(self) -> str:
-        return self._val("langgraph", "checkpointer_db")
+    def memory_working_max_turns(self) -> int:
+        return self._val("memory", "working_memory_max_turns")
 
     @property
-    def langgraph_max_recursion_limit(self) -> int:
-        return self._val("langgraph", "max_recursion_limit")
+    def memory_long_term_enabled(self) -> bool:
+        return self._val("memory", "long_term_enabled")
+
+    @property
+    def memory_long_term_min_importance(self) -> float:
+        return self._val("memory", "long_term_min_importance")
+
+    # ── MCP ──────────────────────────────────────────────────────
+
+    @property
+    def mcp_enabled(self) -> bool:
+        return self._val("mcp", "enabled", default=True)
