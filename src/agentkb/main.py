@@ -2,8 +2,20 @@
 
 from __future__ import annotations
 
+import sys
+import threading
 import webbrowser
 from pathlib import Path
+
+# 直接执行本文件时，使用 src 作为导入根目录，避免同级模块遮蔽第三方包。
+if __package__ in {None, ""}:
+    package_dir = Path(__file__).resolve().parent
+    sys.path = [
+        entry
+        for entry in sys.path
+        if Path(entry or ".").resolve() != package_dir
+    ]
+    sys.path.insert(0, str(package_dir.parent))
 
 from agentkb.config.settings import Settings
 from agentkb.utils.logger import setup_logger
@@ -159,9 +171,14 @@ def main() -> None:
     if custom_agent_count:
         logger.info(f"已恢复 {custom_agent_count} 个自定义 Agent")
 
-    # 6. 验证 LLM + 预热向量模型
+    # 6. 验证 LLM + 后台预热向量模型
     _init_llm(cfg)
-    _init_embedder(cfg)
+    threading.Thread(
+        target=_init_embedder,
+        args=(cfg,),
+        name="embedder-preload",
+        daemon=True,
+    ).start()
 
     # 7. 构建 LangGraph 单 Agent 图
     import asyncio

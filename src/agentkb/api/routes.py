@@ -17,7 +17,6 @@ from loguru import logger
 
 from agentkb.api.deps import get_graph, get_multi_agent_graph, get_settings, get_session_mgr
 from agentkb.knowledge.cache import get_cache
-from agentkb.knowledge.embedder import get_embedder
 from agentkb.knowledge.loader import FileLoader
 from agentkb.knowledge.graph import (
     cancel_knowledge_graph_index,
@@ -446,6 +445,8 @@ def get_capabilities():
 async def upload_files(files: list[UploadFile] = File(...)):
     """上传知识文件并完成切块→向量化→入库全流程。"""
     cfg = get_settings()
+    from agentkb.knowledge.embedder import get_embedder
+
     loader = FileLoader(cfg)
     embedder = get_embedder(
         model_name=cfg.embedding_model_name,
@@ -748,20 +749,26 @@ def health_check():
         status["components"]["postgresql"] = f"error: {e}"
         status["status"] = "degraded"
 
-    # LLM
+    # LLM 配置
     try:
-        from agentkb.llm.factory import get_chat_model
-        get_chat_model(streaming=True)
-        status["components"]["llm"] = "ok"
+        cfg = get_settings()
+        status["components"]["llm"] = {
+            "status": "configured",
+            "provider": cfg.llm_provider,
+            "model": cfg.llm_generator_model_name,
+        }
     except Exception as e:
         status["components"]["llm"] = f"error: {e}"
         status["status"] = "degraded"
 
-    # Embedder
+    # Embedder 配置
     try:
-        from agentkb.knowledge.embedder import get_embedder
-        get_embedder()
-        status["components"]["embedder"] = "ok"
+        cfg = get_settings()
+        status["components"]["embedder"] = {
+            "status": "configured",
+            "model": cfg.embedding_model_name,
+            "device": cfg.embedding_device,
+        }
     except Exception as e:
         status["components"]["embedder"] = f"error: {e}"
         status["status"] = "degraded"
